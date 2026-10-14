@@ -1,0 +1,447 @@
+/*
+ * ESP32-C3 IR input -> BLE HID output.
+ * Arduino ESP32 3.x, ArduinoJson 7.x, IRremote 4.x,
+ * NimBLE-Arduino 2.5.x, WebSockets 2.x.
+ * Upload data/ separately as a LittleFS image.
+ */
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#define RAW_BUFFER_LENGTH 750
+#define RECORD_GAP_MICROS 12000
+#include <IRremote.hpp>
+#include <LittleFS.h>
+#include "bindings.h"
+#include "ble_hid.h"
+#include "globals.h"
+#include "remote_store.h"
+#include "file_api.h"
+#include "action_router.h"
+
+static const uint8_t kIrDataPin = 5, kSensorGroundPin = 6, kSensorVccPin = 7, kLedPin = 8;
+static const char kApSsid[] = "IR-C3-Remote";
+static const char kApPassword[] = "irremote123";
+WebServer server(80);
+WebSocketsServer sockets(81);
+
+// 热点名称与密码来自 remoteConfig["settings"]，常量仅作缺省回退。
+static void applyAccessPoint() {
+  String ssid = remoteConfig["settings"]["apSsid"] | kApSsid;
+  String password = remoteConfig["settings"]["apPassword"] | kApPassword;
+  WiFi.softAP(ssid.c_str(), password.c_str(), 6, false, 4);
+}
+Binding bindings[kMaxBindings];
+uint8_t bindingCount = 0;
+bool learningMode = false, hidRunning = false, macroRunning = false, hidNeedsRelease = false;
+uint32_t frameCount = 0, hidDeadline = 0, hidStarted = 0;
+char lastProto[16] = "", lastCode[32] = "";
+size_t macroStep = 0, macroTextOffset = 0;
+JsonDocument runningSteps;
+static String learningRemote;
+static uint32_t learningUntil = 0, lastFrameAt = 0, ledUntil = 0;
+static bool storageReady = false;
+static bool stateDirty = false;
+static JsonDocument pendingCapture;
+static String pendingCaptureId;
+static String pendingCaptureRemote;
+static bool filesystemMounted = false;
+
+void socketSend(uint8_t client, JsonDocument& doc) {
+  String message;
+  serializeJson(doc, message);
+  sockets.sendTXT(client, message);
+}
+
+void pushState(int client = -1) {
+  JsonDocument doc;
+  doc["event"] = "state";
+  writeConfigSummary(doc["config"].to<JsonObject>());
+  JsonObject status = doc["status"].to<JsonObject>();
+  status["learningRemote"] = learningRemote;
+  status["frames"] = frameCount;
+  status["heap"] = ESP.getFreeHeap();
+  status["storageReady"] = storageReady;
+  status["hidRunning"] = hidRunning;
+  status["fsTotal"] = filesystemMounted ? LittleFS.totalBytes() : 0;
+  status["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
+  bleHostStatus(status["ble"].to<JsonObject>());
+  String message;
+  serializeJson(doc, message);
+  if (client < 0) sockets.broadcastTXT(message);
+  else sockets.sendTXT(client, message);
+}
+
+void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length) {
+  if (type == WStype_CONNECTED) { pushState(client); return; }
+  if (type != WStype_TEXT) return;
+  JsonDocument request, response;
+  String error;
+  bool applyApAfter = false, applyBleNameAfter = false;
+  if (length > 4096 || deserializeJson(request, payload, length)) error = "Invalid or oversized JSON";
+  response["id"] = request["id"];
+  String op = request["op"] | "";
+  JsonObjectConst args = request["args"].as<JsonObjectConst>();
+  if (error.isEmpty()) {
+    if (op == "state.get") {
+      pushState(client);
+    } else if (op == "learn.start") {
+      String id = args["remoteId"] | "";
+      bool found = false;
+      for (JsonObjectConst remote : remoteConfig["remotes"].as<JsonArrayConst>())
+        if (remote["id"].as<String>() == id && remote["transport"] == "ir") found = true;
+      if (!found) error = "Select an IR remote first";
+      else {
+        stopHid("learning");
+        learningRemote = id;
+        learningMode = true;
+        learningUntil = millis() + 300000;
+        stateDirty = true;
+      }
+    } else if (op == "learn.stop" || op == "hid.stop") {
+      stopHid("user");
+      learningMode = false; learningRemote = ""; stateDirty = true;
+    } else if (op == "hosts.pair") {
+      blePairingOpen(); stateDirty = true;
+    } else if (op == "hosts.reconnect") {
+      stopHid("switch-host");
+      bleReconnectHosts(); stateDirty = true;
+    } else if (op == "mappings.test" || op == "macros.test") {
+      if (learningMode) error = "Stop learning before testing";
+      else {
+        bool found = false, needsIrTx = false;
+        JsonDocument descriptor;
+        if (op == "macros.test") {
+          for (JsonObjectConst macro : remoteConfig["macros"].as<JsonArrayConst>()) {
+            if (macro["id"].as<String>() != args["id"].as<String>()) continue;
+            found = true;
+            descriptor["type"] = kTypeMacro;
+            descriptor["macroId"] = macro["id"];
+            for (JsonObjectConst step : macro["steps"].as<JsonArrayConst>())
+              if (strcmp(step["kind"] | "", "ir") == 0) needsIrTx = true;
+          }
+        } else {
+          for (JsonObjectConst mapping : remoteConfig["mappings"].as<JsonArrayConst>()) {
+            if (mapping["id"].as<String>() != args["id"].as<String>()) continue;
+            found = true;
+            descriptor.set(mapping);
+            if (strcmp(mapping["target"] | "ble-hid", "ir-send") == 0) needsIrTx = true;
+          }
+        }
+        if (!found) error = "Item not found";
+        else if (needsIrTx)
+          error = "IR transmit needs the IR LED hardware (phase 3); mapping is saved but not executable yet";
+        else if (!dispatchAction(descriptor.as<JsonObjectConst>()))
+          error = "BLE must be encrypted, report subscribed, and HID idle";
+        else stateDirty = true;
+      }
+    } else if (!storageReady) {
+      error = "Storage unavailable; configuration is read-only";
+    } else {
+      // A failed mutation/save restores the complete previous configuration.
+      JsonDocument previous;
+      previous.set(remoteConfig);
+      String captureFile;
+      if (op == "keys.save" && !args["captureId"].as<String>().isEmpty()) {
+        if (args["captureId"].as<String>() != pendingCaptureId ||
+            args["remoteId"].as<String>() != pendingCaptureRemote ||
+            args["proto"].as<String>() != pendingCapture["protocol"].as<String>() ||
+            args["code"].as<String>() != pendingCapture["decodedRawHex"].as<String>()) {
+          error = "Capture expired or mismatched; learn again";
+        } else {
+          LittleFS.mkdir("/captures");
+          captureFile = "/captures/" + pendingCaptureId + ".json";
+          File file = LittleFS.open("/capture.tmp", "w");
+          size_t expected = measureJson(pendingCapture);
+          bool ok = file && serializeJson(pendingCapture, file) == expected;
+          if (file) { file.flush(); file.close(); }
+          if (!ok || !LittleFS.rename("/capture.tmp", captureFile)) error = "Capture save failed";
+        }
+      } else if (op == "keys.save" && args["id"].as<String>().isEmpty()) {
+        error = "A new key requires a full device capture";
+      } else if (op == "keys.save") {
+        for (JsonObjectConst key : remoteConfig["keys"].as<JsonArrayConst>())
+          if (key["id"].as<String>() == args["id"].as<String>() &&
+              (key["proto"].as<String>() != args["proto"].as<String>() ||
+               key["code"].as<String>() != args["code"].as<String>() ||
+               key["remoteId"].as<String>() != args["remoteId"].as<String>()))
+            error = "Changing input identity requires learning a new capture";
+      }
+      bool forget = op == "hosts.delete";
+      String address;
+      uint8_t addressType = 0;
+      if (forget)
+        for (JsonObjectConst host : remoteConfig["hosts"].as<JsonArrayConst>())
+          if (host["id"].as<String>() == args["id"].as<String>()) {
+            address = host["address"].as<String>();
+            addressType = host["addressType"] | 0;
+          }
+      bool changed = error.isEmpty() && remoteStoreCommand(op, args, error);
+      if (changed && !captureFile.isEmpty()) {
+        for (JsonObject key : remoteConfig["keys"].as<JsonArray>())
+          if (key["proto"] == args["proto"] && key["code"] == args["code"]) {
+            key["capturePath"] = captureFile; key["captureStatus"] = "envelope-complete";
+          }
+      }
+      if (!changed || !saveRemoteConfig()) {
+        if (error.isEmpty()) error = "Configuration save failed";
+        remoteConfig.set(previous);
+        if (!captureFile.isEmpty()) LittleFS.remove(captureFile);
+      } else {
+        if (!captureFile.isEmpty()) { pendingCapture.clear(); pendingCaptureId = ""; }
+        // Remove replaced/deleted capture files only after configuration commits.
+        for (JsonObjectConst oldKey : previous["keys"].as<JsonArrayConst>()) {
+          String path = oldKey["capturePath"] | "";
+          if (path.isEmpty()) continue;
+          bool referenced = false;
+          for (JsonObjectConst key : remoteConfig["keys"].as<JsonArrayConst>())
+            if (key["capturePath"].as<String>() == path) referenced = true;
+          if (!referenced) LittleFS.remove(path);
+        }
+        if (forget && !bleHostForget(address.c_str(), addressType)) {
+          remoteConfig.set(previous);
+          error = saveRemoteConfig() ? "BLE bond removal failed; host retained"
+                                     : "BLE bond removal failed; configuration rollback failed";
+        }
+        if (error.isEmpty() && op.startsWith("hosts.")) bleReconnectHosts();
+        if (error.isEmpty() && op == "settings.save") {
+          // 热点重启或蓝牙重广播都会扰动连接：先记下来，回包之后再应用。
+          if (previous["settings"]["apSsid"].as<String>() !=
+                  remoteConfig["settings"]["apSsid"].as<String>() ||
+              previous["settings"]["apPassword"].as<String>() !=
+                  remoteConfig["settings"]["apPassword"].as<String>())
+            applyApAfter = true;
+          if (previous["settings"]["bleName"].as<String>() !=
+              remoteConfig["settings"]["bleName"].as<String>())
+            applyBleNameAfter = true;
+        }
+        stateDirty = true;
+      }
+    }
+  }
+  response["ok"] = error.isEmpty();
+  if (!error.isEmpty()) response["error"] = error;
+  socketSend(client, response);
+  // 响应发出后再应用设置，避免热点重启吞掉成功回包。
+  if (applyApAfter) applyAccessPoint();
+  if (applyBleNameAfter) bleApplyName();
+}
+
+void captureIrFrame() {
+  const IRData data = IrReceiver.decodedIRData;
+  // The ISR reuses rawbuf after resume(); snapshot every tick first.
+  static uint16_t rawTicks[RAW_BUFFER_LENGTH];
+  uint16_t rawCount = data.rawlen > 0 ? data.rawlen - 1 : 0;
+  if (rawCount >= RAW_BUFFER_LENGTH) rawCount = RAW_BUFFER_LENGTH - 1;
+  if (learningMode)
+    for (uint16_t i = 0; i < rawCount; ++i) rawTicks[i] = IrReceiver.irparams.rawbuf[i + 1];
+  // Resume reception before any networking or HID work.
+  IrReceiver.resume();
+  uint32_t now = millis();
+  ledUntil = now + 300;
+  bool repeat = data.flags & IRDATA_FLAGS_IS_REPEAT;
+  bool overflow = data.flags & IRDATA_FLAGS_WAS_OVERFLOW;
+  // Filter significant hex length, not the zero-padded storage representation.
+  // Repeat packets may contain no code; only reuse an already accepted frame.
+  if (!repeat && data.decodedRawData < 0x10000000ULL) {
+    lastProto[0] = '\0';
+    return;
+  }
+  // 可配置的脉冲数下限：短于 n 段的非重复帧视为干扰丢弃（学习与执行均生效）。
+  // 重复帧本身只有几段脉冲，不参与该过滤。
+  int minPulses = remoteConfig["settings"]["minPulses"] | 8;
+  if (minPulses < 0) minPulses = 0;
+  if (minPulses > RAW_BUFFER_LENGTH) minPulses = RAW_BUFFER_LENGTH;
+  if (!repeat && static_cast<int>(rawCount) < minPulses) {
+    lastProto[0] = '\0';
+    return;
+  }
+  if (overflow || (data.protocol == UNKNOWN && !learningMode)) {
+    lastProto[0] = '\0';
+    ++frameCount;
+    if (learningMode && overflow) {
+      pendingCapture.clear(); pendingCaptureId = "";
+      String message = "{\"event\":\"capture.error\",\"error\":\"IR buffer overflow; no complete capture saved\"}";
+      sockets.broadcastTXT(message);
+    }
+    return;
+  }
+  String proto = getProtocolString(data.protocol);
+  char code[17];
+  snprintf(code, sizeof(code), "%016llX", static_cast<unsigned long long>(data.decodedRawData));
+  if (repeat) {
+    if (!lastProto[0] || now - lastFrameAt > 350) return;
+    proto = lastProto;
+    strlcpy(code, lastCode, sizeof(code));
+  } else if (data.protocol != UNKNOWN && !overflow) {
+    strlcpy(lastProto, proto.c_str(), sizeof(lastProto));
+    strlcpy(lastCode, code, sizeof(lastCode));
+  }
+  lastFrameAt = now;
+  ++frameCount;
+  if (learningMode && !repeat) {
+    if (rawCount < 3) return;
+    pendingCapture.clear();
+    pendingCapture["version"] = 1;
+    pendingCapture["encoding"] = "alternating-mark-space-ticks";
+    pendingCapture["startsWith"] = "mark";
+    pendingCapture["tickMicros"] = MICROS_PER_TICK;
+    pendingCapture["initialGapTicks"] = data.initialGapTicks;
+    pendingCapture["recordGapMicros"] = RECORD_GAP_MICROS;
+    pendingCapture["markExcessMicros"] = MARK_EXCESS_MICROS;
+    pendingCapture["carrierHz"] = nullptr;
+    pendingCapture["carrierMeasured"] = false;
+    pendingCapture["protocol"] = proto;
+    pendingCapture["address"] = data.address;
+    pendingCapture["command"] = data.command;
+    pendingCapture["extra"] = data.extra;
+    pendingCapture["flags"] = data.flags;
+    pendingCapture["bits"] = data.numberOfBits;
+    pendingCapture["decodedRawHex"] = code;
+    pendingCapture["overflow"] = false;
+    pendingCapture["rawBufferCapacity"] = RAW_BUFFER_LENGTH;
+    pendingCapture["captureScope"] = "single-frame-envelope";
+    JsonArray ticks = pendingCapture["rawTicks"].to<JsonArray>();
+    for (uint16_t i = 0; i < rawCount; ++i) ticks.add(rawTicks[i]);
+    pendingCaptureId = String(esp_random(), HEX) + "-" + String(now, HEX);
+    pendingCaptureRemote = learningRemote;
+    JsonDocument doc;
+    doc["event"] = "input";
+    doc["remoteId"] = learningRemote;
+    doc["transport"] = "ir";
+    doc["proto"] = proto;
+    doc["code"] = code;
+    doc["bits"] = data.numberOfBits;
+    doc["captureId"] = pendingCaptureId;
+    doc["pulseCount"] = rawCount;
+    String message;
+    serializeJson(doc, message);
+    sockets.broadcastTXT(message);
+    learningUntil = now + 300000;
+  } else if (!learningMode) {
+    dispatchInput("ir", "", proto.c_str(), code, repeat);
+  }
+}
+
+void exportData() {
+  String scope = server.arg("scope");
+  if (scope != "remotes" && scope != "macros" && scope != "all") {
+    server.send(400, "application/json", "{\"error\":\"Invalid export scope\"}"); return;
+  }
+  if (!storageReady) {
+    server.send(503, "application/json", "{\"error\":\"Configuration unavailable\"}"); return;
+  }
+  // Stream capture files; do not load all raw timings into the C3 heap.
+  server.sendHeader("Content-Disposition", "attachment; filename=\"ir-remote-export.json\"");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json; charset=utf-8", "");
+  server.sendContent("{\"format\":\"esp32-remote-export\",\"version\":1,\"configVersion\":2");
+  String json;
+  if (scope != "macros") {
+    serializeJson(remoteConfig["remotes"], json);
+    server.sendContent(",\"remotes\":" + json);
+    json = ""; serializeJson(remoteConfig["keys"], json);
+    server.sendContent(",\"keys\":" + json);
+    server.sendContent(",\"captures\":{");
+    bool first = true;
+    for (JsonObjectConst key : remoteConfig["keys"].as<JsonArrayConst>()) {
+      String path = key["capturePath"] | "";
+      if (path.isEmpty()) continue;
+      File capture = LittleFS.open(path, "r");
+      if (!capture) continue;
+      JsonDocument label; label.set(key["id"]);
+      json = ""; serializeJson(label, json);
+      server.sendContent((first ? "" : ",") + json + ":");
+      first = false;
+      char buffer[512];
+      while (capture.available()) {
+        size_t count = capture.readBytes(buffer, sizeof(buffer));
+        server.sendContent(buffer, count);
+      }
+      capture.close();
+    }
+    server.sendContent("}");
+  }
+  if (scope != "remotes") {
+    json = ""; serializeJson(remoteConfig["macros"], json);
+    server.sendContent(",\"macros\":" + json);
+  }
+  if (scope == "all") {
+    json = ""; serializeJson(remoteConfig["mappings"], json);
+    server.sendContent(",\"mappings\":" + json);
+  }
+  server.sendContent("}");
+  server.sendContent("");
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(kSensorGroundPin, OUTPUT); digitalWrite(kSensorGroundPin, LOW);
+  pinMode(kSensorVccPin, OUTPUT); digitalWrite(kSensorVccPin, HIGH);
+  pinMode(kIrDataPin, INPUT);
+  pinMode(kLedPin, OUTPUT); digitalWrite(kLedPin, HIGH);
+  IrReceiver.begin(kIrDataPin, DISABLE_LED_FEEDBACK);
+  filesystemMounted = LittleFS.begin(false);
+  storageReady = filesystemMounted;
+  if (storageReady) storageReady = remoteStoreBegin();
+  if (!storageReady) Serial.println("[STORE] mount/load failed; no automatic formatting");
+  WiFi.mode(WIFI_AP);
+  WiFi.setSleep(false);
+  applyAccessPoint();
+  bleHidBegin();
+  fileApiBegin(server);
+  server.on("/api/export", HTTP_GET, exportData);
+  server.on("/api/status", HTTP_GET, [] {
+    JsonDocument doc;
+    doc["storageReady"] = storageReady;
+    doc["filesystemMounted"] = filesystemMounted;
+    doc["websocketPort"] = 81;
+    doc["heap"] = ESP.getFreeHeap();
+    doc["fsTotal"] = filesystemMounted ? LittleFS.totalBytes() : 0;
+    doc["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
+    // 便于在未部署前端时展示实际生效的热点与蓝牙名称。
+    doc["apSsid"] = remoteConfig["settings"]["apSsid"] | kApSsid;
+    doc["bleName"] = remoteConfig["settings"]["bleName"] | "ESP32-C3 IR Remote";
+    bleHostStatus(doc["ble"].to<JsonObject>());
+    String message; serializeJson(doc, message);
+    server.send(200, "application/json", message);
+  });
+  // 未命中任何显式路由时按 /frontend 静态资源处理（含 SPA 路由回退）。
+  server.onNotFound([] { fileApiServeStatic(server.uri()); });
+  server.begin();
+  sockets.begin();
+  sockets.onEvent(socketEvent);
+  sockets.enableHeartbeat(15000, 3000, 2);
+  Serial.printf("[WEB] http://%s; WebSocket port 81\n", WiFi.softAPIP().toString().c_str());
+}
+
+void loop() {
+  if (IrReceiver.decode()) captureIrFrame();
+  tickBleHosts();
+  tickHid();
+  uint32_t now = millis();
+  if (learningMode && static_cast<int32_t>(now - learningUntil) >= 0) {
+    learningMode = false; learningRemote = ""; stateDirty = true;
+  }
+  digitalWrite(kLedPin, static_cast<int32_t>(ledUntil - now) > 0 && ((now / 60) & 1) ? LOW : HIGH);
+  server.handleClient();
+  sockets.loop();
+  static bool wasConnected = false, wasRunning = false;
+  static size_t hosts = 0;
+  static String preferred;
+  static String previousBleStatus;
+  JsonDocument status;
+  bleHostStatus(status.to<JsonObject>());
+  String target = status["preferredHost"] | "";
+  String bleStatus;
+  serializeJson(status, bleStatus);
+  if (previousBleStatus != bleStatus) {
+    previousBleStatus = bleStatus;
+    stateDirty = true;
+  }
+  if (wasConnected != bleHidConnected() || wasRunning != hidRunning ||
+      hosts != remoteConfig["hosts"].size() || preferred != target) stateDirty = true;
+  wasConnected = bleHidConnected(); wasRunning = hidRunning;
+  hosts = remoteConfig["hosts"].size(); preferred = target;
+  if (stateDirty) { stateDirty = false; pushState(); }
+  delay(1);
+}
