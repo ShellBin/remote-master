@@ -47,6 +47,10 @@ export function isIrOnlyMacro(macro) {
 }
 
 /** 时间戳形式的导出文件名，例如 esp32-all-2026-10-14.json */
-export function exportFilename(scope) {
-  return `esp32-${scope}-${new Date().toISOString().slice(0, 10)}.json`;
+export function exportFilename(scope, remoteName = '') {
+  const date = new Date().toISOString().slice(0, 10);
+  const name = remoteName ? `${remoteName.replace(/[^\w一-鿿-]/g, '_')}-` : '';
+  return scope === 'remote' && remoteName
+    ? `${name}${date}.json`
+    : `esp32-${scope}-${name}${date}.json`;
 }

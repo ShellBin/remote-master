@@ -12,7 +12,7 @@ const routes = [
   {path: '/remotes', name: 'remotes', component: RemotesView, meta: {label: '遥控器与学习'}},
   {path: '/macros', name: 'macros', component: MacrosView, meta: {label: '动作与序列'}},
   {path: '/mappings', name: 'mappings', component: MappingsView, meta: {label: '按键映射'}},
-  {path: '/system', name: 'system', component: SystemView, meta: {label: '系统'}},
+  {path: '/system', name: 'system', component: SystemView, meta: {label: '系统设置'}},
   // 固件对不含扩展名的路径回退 index.html，因此深链接刷新由前端兜住。
   {path: '/:pathMatch(.*)*', redirect: '/remotes'},
 ];

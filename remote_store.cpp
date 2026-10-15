@@ -256,11 +256,51 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {
               step["keyId"].as<String>() == id) {
             error = "Remove IR replay steps referencing this key first"; return false;
           }
-    if (collection == "remotes")
-      for (JsonObjectConst k : remoteConfig["keys"].as<JsonArrayConst>())
-        if (k["remoteId"].as<String>() == id) {
-          error = "Remove remote keys first"; return false;
+    if (collection == "remotes") {
+      // 级联删除前检查：该遥控器下的按键若被映射或宏引用，需要先清理
+      // 收集该遥控器下的所有按键 ID
+      std::vector<String> keyIds;
+      for (JsonObjectConst key : remoteConfig["keys"].as<JsonArrayConst>())
+        if (key["remoteId"].as<String>() == id)
+          keyIds.push_back(key["id"].as<String>());
+      // 检查这些按键是否被任何映射引用
+      for (const String& keyId : keyIds) {
+        for (JsonObjectConst m : remoteConfig["mappings"].as<JsonArrayConst>()) {
+          if (m["keyId"].as<String>() == keyId || m["outKeyId"].as<String>() == keyId) {
+            error = "Remove referencing mappings first";
+            return false;
+          }
         }
+      }
+      // 检查这些按键是否被任何宏的红外重放步骤引用
+      for (const String& keyId : keyIds) {
+        for (JsonObjectConst macro : remoteConfig["macros"].as<JsonArrayConst>()) {
+          for (JsonObjectConst step : macro["steps"].as<JsonArrayConst>()) {
+            if (strcmp(step["kind"] | "", "ir") == 0 && step["keyId"].as<String>() == keyId) {
+              error = "Remove IR replay steps referencing this remote's keys first";
+              return false;
+            }
+          }
+        }
+      }
+      // 检查通过，级联删除：收集要删除的按键下标（逆序删除，保持下标有效）
+      JsonArray keys = remoteConfig["keys"].as<JsonArray>();
+      std::vector<size_t> removeIdx;
+      for (size_t i = 0; i < keys.size(); i++)
+        if (keys[i]["remoteId"].as<String>() == id)
+          removeIdx.push_back(i);
+      for (auto it = removeIdx.rbegin(); it != removeIdx.rend(); ++it)
+        keys.remove(*it);
+      // 删除遥控器本身
+      for (size_t i = 0; i < items.size(); i++) {
+        if (items[i]["id"].as<String>() == id) {
+          items.remove(i);
+          break;
+        }
+      }
+      // 采样文件由 ino 按 previous vs current 配置差异自动清理
+      return true;
+    }
     // Resolve the requested ID explicitly before removing its array element.
     for (auto it = items.begin(); it != items.end(); ++it) {
       if ((*it)["id"].as<String>() == id) {
@@ -284,23 +324,23 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {
   }
   if (collection == "remotes") {
     // BLE central input is reserved, not advertised as implemented.
-    if (obj["transport"].as<String>() != "ir") {
+    if (strcmp(obj["transport"] | "", "ir") != 0) {
       error = "BLE remote input is reserved for a future transport adapter"; return false;
     }
     obj["device"] = "";
   } else if (collection == "keys") {
-    // Capture data is written by firmware, not echoed back from browser input.
+    // Capture data is written by firmware (learning flow) or pre-uploaded (import flow).
     if (!existing.isNull()) {
       obj["capturePath"] = existing["capturePath"];
       obj["captureStatus"] = existing["captureStatus"];
-    } else {
+    } else if (obj["capturePath"].isNull()) {
       obj.remove("capturePath");
       obj.remove("captureStatus");
     }
     JsonObject remote = findItem("remotes", obj["remoteId"].as<String>());
     String proto = obj["proto"] | "", code = obj["code"] | "";
-    if (remote.isNull() || proto.isEmpty() || proto.length() > 15 ||
-        code.isEmpty() || code.length() > 16) {
+    if (remote.isNull()) { error = "Remote not found"; return false; }
+    if (proto.isEmpty() || proto.length() > 15 || code.isEmpty() || code.length() > 16) {
       error = "Invalid learned input"; return false;
     }
     for (char c : code) if (!isxdigit(static_cast<unsigned char>(c))) {
@@ -314,7 +354,8 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {
     for (JsonObjectConst k : items) {
       if (k["id"].as<String>() != id &&
           k["remoteId"].as<String>() == obj["remoteId"].as<String>() &&
-          k["proto"].as<String>() == proto && k["code"].as<String>() == code) {
+          strcmp(k["proto"] | "", proto.c_str()) == 0 &&
+          strcmp(k["code"] | "", code.c_str()) == 0) {
         error = "This IR signal already belongs to a key on this remote"; return false;
       }
     }

@@ -104,7 +104,7 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
       String id = args["remoteId"] | "";
       bool found = false;
       for (JsonObjectConst remote : remoteConfig["remotes"].as<JsonArrayConst>())
-        if (remote["id"].as<String>() == id && remote["transport"] == "ir") found = true;
+        if (remote["id"].as<String>() == id && strcmp(remote["transport"] | "", "ir") == 0) found = true;
       if (!found) error = "Select an IR remote first";
       else {
         stopHid("learning");
@@ -175,30 +175,43 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
       JsonDocument previous;
       previous.set(remoteConfig);
       String captureFile;
-      if (op == "keys.save" && !args["captureId"].as<String>().isEmpty()) {
-        if (args["captureId"].as<String>() != pendingCaptureId ||
-            args["remoteId"].as<String>() != pendingCaptureRemote ||
-            args["proto"].as<String>() != pendingCapture["protocol"].as<String>() ||
-            args["code"].as<String>() != pendingCapture["decodedRawHex"].as<String>()) {
-          error = "Capture expired or mismatched; learn again";
-        } else {
-          LittleFS.mkdir("/captures");
-          captureFile = "/captures/" + pendingCaptureId + ".json";
-          File file = LittleFS.open("/capture.tmp", "w");
-          size_t expected = measureJson(pendingCapture);
-          bool ok = file && serializeJson(pendingCapture, file) == expected;
-          if (file) { file.flush(); file.close(); }
-          if (!ok || !LittleFS.rename("/capture.tmp", captureFile)) error = "Capture save failed";
+      if (op == "keys.save") {
+        // 导入流程：有 capturePath 无 id（新按键，采样文件已预上传）
+        if (!args["capturePath"].as<String>().isEmpty() && !args.containsKey("id")) {
+          if (!LittleFS.exists(args["capturePath"].as<String>())) {
+            error = "Capture file not found at specified path";
+          }
         }
-      } else if (op == "keys.save" && args["id"].as<String>().isEmpty()) {
-        error = "A new key requires a full device capture";
-      } else if (op == "keys.save") {
-        for (JsonObjectConst key : remoteConfig["keys"].as<JsonArrayConst>())
-          if (key["id"].as<String>() == args["id"].as<String>() &&
-              (key["proto"].as<String>() != args["proto"].as<String>() ||
-               key["code"].as<String>() != args["code"].as<String>() ||
-               key["remoteId"].as<String>() != args["remoteId"].as<String>()))
-            error = "Changing input identity requires learning a new capture";
+        // 学习流程：有 captureId（刚学到的信号）
+        else if (args.containsKey("captureId") && !args["captureId"].as<String>().isEmpty()) {
+          if (args["captureId"].as<String>() != pendingCaptureId ||
+              args["remoteId"].as<String>() != pendingCaptureRemote ||
+              args["proto"].as<String>() != pendingCapture["protocol"].as<String>() ||
+              args["code"].as<String>() != pendingCapture["decodedRawHex"].as<String>()) {
+            error = "Capture expired or mismatched; learn again";
+          } else {
+            LittleFS.mkdir("/captures");
+            captureFile = "/captures/" + pendingCaptureId + ".json";
+            File file = LittleFS.open("/capture.tmp", "w");
+            size_t expected = measureJson(pendingCapture);
+            bool ok = file && serializeJson(pendingCapture, file) == expected;
+            if (file) { file.flush(); file.close(); }
+            if (!ok || !LittleFS.rename("/capture.tmp", captureFile)) error = "Capture save failed";
+          }
+        }
+        // 全新按键但无 capturePath 也无 captureId
+        else if (!args.containsKey("id")) {
+          error = "A new key requires a full device capture";
+        }
+        // 修改现有按键（有 id）
+        else {
+          for (JsonObjectConst key : remoteConfig["keys"].as<JsonArrayConst>())
+            if (key["id"].as<String>() == args["id"].as<String>() &&
+                (key["proto"].as<String>() != args["proto"].as<String>() ||
+                 key["code"].as<String>() != args["code"].as<String>() ||
+                 key["remoteId"].as<String>() != args["remoteId"].as<String>()))
+              error = "Changing input identity requires learning a new capture";
+        }
       }
       bool forget = op == "hosts.delete";
       String address;
@@ -212,7 +225,8 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
       bool changed = error.isEmpty() && remoteStoreCommand(op, args, error);
       if (changed && !captureFile.isEmpty()) {
         for (JsonObject key : remoteConfig["keys"].as<JsonArray>())
-          if (key["proto"] == args["proto"] && key["code"] == args["code"]) {
+          if (strcmp(key["proto"] | "", args["proto"] | "") == 0 &&
+              strcmp(key["code"] | "", args["code"] | "") == 0) {
             key["capturePath"] = captureFile; key["captureStatus"] = "envelope-complete";
           }
       }
@@ -352,50 +366,96 @@ void captureIrFrame() {
     sockets.broadcastTXT(message);
     learningUntil = now + 300000;
   } else if (!learningMode) {
+    // 非学习模式也广播 input 事件，用于前端按键卡片高亮提示
+    {
+      JsonDocument evt;
+      evt["event"] = "input";
+      evt["transport"] = "ir";
+      evt["proto"] = proto;
+      evt["code"] = code;
+      evt["pulseCount"] = rawCount;
+      String msg;
+      serializeJson(evt, msg);
+      sockets.broadcastTXT(msg);
+    }
     dispatchInput("ir", "", proto.c_str(), code, repeat);
   }
 }
 
 void exportData() {
   String scope = server.arg("scope");
-  if (scope != "remotes" && scope != "macros" && scope != "all") {
+  String remoteId = server.arg("remoteId");
+  if (scope != "remotes" && scope != "macros" && scope != "all" && scope != "remote") {
     server.send(400, "application/json", "{\"error\":\"Invalid export scope\"}"); return;
+  }
+  if (scope == "remote" && remoteId.isEmpty()) {
+    server.send(400, "application/json", "{\"error\":\"Missing remoteId parameter\"}"); return;
   }
   if (!storageReady) {
     server.send(503, "application/json", "{\"error\":\"Configuration unavailable\"}"); return;
   }
-  // Stream capture files; do not load all raw timings into the C3 heap.
   server.sendHeader("Content-Disposition", "attachment; filename=\"ir-remote-export.json\"");
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "application/json; charset=utf-8", "");
-  server.sendContent("{\"format\":\"esp32-remote-export\",\"version\":1,\"configVersion\":2");
+  server.sendContent("{\"format\":\"esp32-remote\"");
   String json;
-  if (scope != "macros") {
-    serializeJson(remoteConfig["remotes"], json);
-    server.sendContent(",\"remotes\":" + json);
-    json = ""; serializeJson(remoteConfig["keys"], json);
-    server.sendContent(",\"keys\":" + json);
-    server.sendContent(",\"captures\":{");
-    bool first = true;
-    for (JsonObjectConst key : remoteConfig["keys"].as<JsonArrayConst>()) {
-      String path = key["capturePath"] | "";
-      if (path.isEmpty()) continue;
-      File capture = LittleFS.open(path, "r");
-      if (!capture) continue;
-      JsonDocument label; label.set(key["id"]);
-      json = ""; serializeJson(label, json);
-      server.sendContent((first ? "" : ",") + json + ":");
-      first = false;
-      char buffer[512];
-      while (capture.available()) {
-        size_t count = capture.readBytes(buffer, sizeof(buffer));
-        server.sendContent(buffer, count);
-      }
-      capture.close();
-    }
-    server.sendContent("}");
+
+  // 1. remotes 数组
+  JsonDocument outRemotes;
+  JsonArray remotesArr = outRemotes.to<JsonArray>();
+  if (scope == "remote") {
+    for (JsonObjectConst r : remoteConfig["remotes"].as<JsonArrayConst>())
+      if (r["id"].as<String>() == remoteId) { remotesArr.add(r); break; }
+  } else if (scope != "macros") {
+    for (JsonObjectConst r : remoteConfig["remotes"].as<JsonArrayConst>()) remotesArr.add(r);
   }
-  if (scope != "remotes") {
+  json = ""; serializeJson(outRemotes, json);
+  server.sendContent(",\"remotes\":" + json);
+
+  // 2. keys 数组（IR: proto + code + capturePath）
+  JsonDocument outKeys;
+  JsonArray keysArr = outKeys.to<JsonArray>();
+  for (JsonObjectConst k : remoteConfig["keys"].as<JsonArrayConst>()) {
+    String rid = k["remoteId"] | "";
+    if (scope == "remote" && rid != remoteId) continue;
+    if (scope == "macros") continue;
+    JsonObject ok = keysArr.add<JsonObject>();
+    ok["id"] = k["id"];
+    ok["name"] = k["name"];
+    ok["remoteId"] = rid;
+    String proto = k["proto"] | "";
+    String code = k["code"] | "";
+    if (!proto.isEmpty()) ok["proto"] = proto;
+    if (!code.isEmpty()) ok["code"] = code;
+    if (!k["capturePath"].isNull()) ok["capturePath"] = k["capturePath"];
+  }
+  json = ""; serializeJson(outKeys, json);
+  server.sendContent(",\"keys\":" + json);
+
+  // 3. captures 对象（按 capturePath 索引，便于导入时直接按路径还原）
+  server.sendContent(",\"captures\":{");
+  bool first = true;
+  for (JsonObjectConst k : remoteConfig["keys"].as<JsonArrayConst>()) {
+    if (scope == "remote" && k["remoteId"].as<String>() != remoteId) continue;
+    String path = k["capturePath"] | "";
+    if (path.isEmpty()) continue;
+    File capture = LittleFS.open(path, "r");
+    if (!capture) continue;
+    JsonDocument label; label.set(path);
+    json = ""; serializeJson(label, json);
+    server.sendContent((first ? "" : ",") + json + ":");
+    first = false;
+    char buffer[512];
+    while (capture.available()) {
+      size_t count = capture.readBytes(buffer, sizeof(buffer));
+      server.sendContent(buffer, count);
+    }
+    capture.close();
+  }
+  server.sendContent("}");
+
+  // 4. macros / mappings（仅 scope=all 或 macros）
+  if (scope != "remotes" && scope != "remote") {
     json = ""; serializeJson(remoteConfig["macros"], json);
     server.sendContent(",\"macros\":" + json);
   }

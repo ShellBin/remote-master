@@ -33,6 +33,8 @@ export const useDeviceStore = defineStore('device', () => {
   const lastInput = ref(null);
   /** 缓冲溢出计数，自增即表示发生了一次溢出（用于触发提示）。 */
   const captureErrors = ref(0);
+  /** input 事件计数器，确保每次事件引用唯一，避免 Vue 合并更新丢失。 */
+  let inputSeq = 0;
 
   // 连接相关的内部状态刻意不做响应式：它们只在浏览器事件回调里使用。
   let socket = null;
@@ -95,7 +97,8 @@ export const useDeviceStore = defineStore('device', () => {
       return;
     }
     if (data.event === 'input') {
-      lastInput.value = data;
+      // 附加唯一计数器，确保连续相同信号也能逐次触发 watch（避免 Vue 合并更新丢失）
+      lastInput.value = { ...data, _seq: inputSeq++ };
       return;
     }
     if (data.event === 'capture.error') {
@@ -143,21 +146,21 @@ export const useDeviceStore = defineStore('device', () => {
   /** 请求设备立刻推送一次完整状态（正常无需调用，连上即自动推送）。 */
   const refresh = () => command('state.get');
 
-  /** 通过 HTTP 导出业务数据并触发浏览器下载。 */
-  async function exportData(scope) {
-    const response = await fetch(`${httpBase()}/api/export?scope=${encodeURIComponent(scope)}`, {
-      signal: AbortSignal.timeout(30000),
-    });
+  /** 通过 HTTP 导出业务数据并触发浏览器下载。scope=remote 时需提供 remoteName 用于命名。 */
+  async function exportData(scope, remoteId = '', remoteName = '') {
+    let url = `${httpBase()}/api/export?scope=${encodeURIComponent(scope)}`;
+    if (scope === 'remote' && remoteId) url += `&remoteId=${encodeURIComponent(remoteId)}`;
+    const response = await fetch(url, {signal: AbortSignal.timeout(30000)});
     if (!response.ok) throw new Error(`导出失败：${await response.text()}`);
     const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
+    const url2 = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = url;
-    link.download = exportFilename(scope);
+    link.href = url2;
+    link.download = exportFilename(scope, remoteName);
     document.body.append(link);
     link.click();
     link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setTimeout(() => URL.revokeObjectURL(url2), 1000);
   }
 
   return {

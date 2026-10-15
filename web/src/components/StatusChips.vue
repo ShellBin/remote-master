@@ -15,7 +15,7 @@ const bleChip = computed(() => {
     return {text: `蓝牙已加密连接 · ${hostName}`, tone: 'ok'};
   }
   if (info.tryingHost) {
-    const hostName = catalog.hostName(info.tryingHost) || info.tryingHost;
+    const hostName = catalog.hostName(info.tryingHost) || tryingHost;
     return {text: `蓝牙正在尝试连接 · ${hostName}`, tone: ''};
   }
   if (info.pairingAlwaysOpen) return {text: '蓝牙配对开放（尚无主机）', tone: ''};
@@ -37,9 +37,13 @@ const storageChip = computed(() => {
 </script>
 
 <template>
-  <div class="chips" role="status" aria-label="设备状态">
+  <div class="chips-inline" role="status" aria-label="设备状态">
     <span class="chip" :class="bleChip.tone">{{ bleChip.text }}</span>
     <span v-if="learningText" class="chip learn">{{ learningText }}</span>
     <span class="chip" :class="storageChip.tone">{{ storageChip.text }}</span>
   </div>
 </template>
+
+<style scoped>
+.chips-inline{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+</style>

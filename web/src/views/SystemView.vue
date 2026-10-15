@@ -146,7 +146,7 @@ function pairHost() {
   run(() => catalog.pairHost(), '已开放配对窗口');
 }
 
-const saveHost = (host, payload) => run(() => catalog.save('hosts', {id: host.id, ...payload}), '主机已保存');
+const saveHost = (host, payload) => run(() => catalog.save('hosts', {id: host.id, ...payload}), '主机名称已保存');
 
 async function forgetHost(host) {
   if (!confirm('忘记主机并删除配对密钥？')) return;
@@ -248,10 +248,10 @@ async function resetSystem() {
 
       <h3>数据导出</h3>
       <div class="actions">
-        <button class="secondary" :disabled="busy" @click="exportData('remotes')">导出遥控器与原始红外数据</button>
         <button class="secondary" :disabled="busy" @click="exportData('macros')">导出动作序列</button>
         <button class="secondary" :disabled="busy" @click="exportData('all')">导出全部业务数据</button>
       </div>
+      <p class="hint">单个遥控器的导出请在「遥控器管理」页面操作</p>
 
       <h3>初始化</h3>
       <div class="actions">

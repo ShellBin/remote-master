@@ -18,9 +18,6 @@ static const char kFallbackHtml[] PROGMEM = R"HTML(<!DOCTYPE html>
   .sub{color:var(--muted);font-size:13px;margin-bottom:24px}
   .card{background:var(--panel);border-radius:12px;padding:16px 18px;margin-bottom:16px}
   .card h2{font-size:15px;margin:0 0 12px;color:var(--muted);font-weight:600;letter-spacing:.02em}
-  .row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}
-  .row:last-child{border-bottom:none}
-  .row .k{color:var(--muted)}
   .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:6px;vertical-align:middle}
   .dot.ok{background:var(--ok)}
   .dot.warn{background:var(--warn)}
@@ -30,12 +27,8 @@ static const char kFallbackHtml[] PROGMEM = R"HTML(<!DOCTYPE html>
   .hint{font-size:13px;color:var(--muted);margin:8px 0}
   code{background:var(--line);padding:2px 6px;border-radius:4px;font-size:12px}
   .upload{display:flex;flex-direction:column;gap:10px}
-  label.file{font-size:13px;color:var(--muted);display:block}
-  input[type=file]{font-size:13px;color:var(--fg);max-width:100%}
-  .btns{display:flex;gap:8px;flex-wrap:wrap}
   button{padding:8px 14px;border:none;border-radius:8px;font-size:14px;cursor:pointer;background:var(--accent);color:#fff}
   button.ghost{background:var(--line);color:var(--fg)}
-  button.danger{background:transparent;color:var(--err);border:1px solid var(--err)}
   button:disabled{opacity:.45;cursor:not-allowed}
   .bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:6px}
   .bar i{display:block;height:100%;background:var(--accent)}
@@ -43,7 +36,7 @@ static const char kFallbackHtml[] PROGMEM = R"HTML(<!DOCTYPE html>
   .log div{padding:2px 0;color:var(--muted);word-break:break-all}
   .log div.ok{color:var(--ok)}
   .log div.err{color:var(--err)}
-  a{color:var(--accent);text-decoration:none}
+  .hidden-file{display:none}
 </style>
 </head>
 <body>
@@ -59,29 +52,14 @@ static const char kFallbackHtml[] PROGMEM = R"HTML(<!DOCTYPE html>
 
   <div class="card">
     <h2>部署前端</h2>
-    <p class="hint">在项目目录构建前端包：<code>cd web &amp;&amp; npm run build</code>，产物输出到 <code>data/frontend</code>。选择该目录整包上传，会先清空设备上的 <code>/frontend</code> 再写入，避免旧构建的哈希文件残留。</p>
+    <p class="hint">在项目目录构建前端包：<code>cd web &amp;&amp; npm run build</code>，产物输出到 <code>data/frontend</code>。点击下方按钮选择该目录，检测到 <code>index.html</code> 后自动上传。</p>
     <p class="hint">命令行方式：<code>node deploy.mjs http://192.168.4.1 --dir data/frontend --remote /frontend</code>。</p>
     <div class="upload">
-      <label class="file">选择构建产物目录（<code>data/frontend</code>）<br>
-        <input type="file" id="dir" webkitdirectory directory multiple>
-      </label>
-      <div class="btns">
-        <button id="btn-up" disabled>上传</button>
-        <button id="btn-wipe" class="danger">清空 /frontend</button>
-      </div>
+      <button id="btn-up">选择并上传前端目录…</button>
+      <input type="file" id="dir" class="hidden-file" webkitdirectory directory multiple>
       <div class="bar" id="bar-wrap" style="display:none"><i id="bar" style="width:0"></i></div>
       <div class="log" id="log"></div>
     </div>
-  </div>
-
-  <div class="card">
-    <h2>API 速查</h2>
-    <div class="row"><span class="k">设备状态</span><span><code>GET /api/status</code></span></div>
-    <div class="row"><span class="k">文件列表 / 下载</span><span><code>GET /api/files[?path=]</code></span></div>
-    <div class="row"><span class="k">上传</span><span><code>POST /api/files?path=/frontend/…</code></span></div>
-    <div class="row"><span class="k">删除</span><span><code>DELETE /api/files?path=/frontend</code></span></div>
-    <div class="row"><span class="k">WebSocket</span><span><code>ws://&lt;ip&gt;:81</code></span></div>
-    <div class="row"><span class="k">导出数据</span><span><code>GET /api/export?scope=all</code></span></div>
   </div>
 </div>
 <script>
@@ -102,11 +80,11 @@ async function loadStatus(){
       ['空闲堆',Math.round(d.heap/1024)+' KB','ok']
     ];
     $('status').innerHTML=rows.map(([k,v,c])=>
-      '<div class="row"><span class="k">'+k+'</span><span class="badge '+c+'"><span class="dot '+c+'"></span>'+v+'</span></div>').join('');
+      '<div class="row" style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #2a2e38;font-size:14px"><span style="color:var(--muted)">'+k+'</span><span class="badge '+c+'"><span class="dot '+c+'"></span>'+v+'</span></div>').join('');
     const total=d.fsTotal||0,used=d.fsUsed||0;
     if(total){
       const free=total-used,pct=Math.round(used*100/total);
-      $('storage').innerHTML='<div class="row"><span class="k">存储占用</span><span class="badge">'
+      $('storage').innerHTML='<div class="row" style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #2a2e38;font-size:14px"><span style="color:var(--muted)">存储占用</span><span class="badge">'
         +Math.round(used/1024)+' / '+Math.round(total/1024)+' KB · 剩余 '+Math.round(free/1024)+' KB</span></div>'
         +'<div class="bar"><i style="width:'+pct+'%"></i></div>';
     }
@@ -116,37 +94,29 @@ function collect(){
   const picked=[];
   const dir=$('dir').files;
   for(const f of dir){
-    // dist/index.html -> index.html：丢掉用户选择的顶层目录名
     const rel=(f.webkitRelativePath||f.name).split('/').slice(1).join('/');
     if(rel) picked.push({file:f,path:rel});
   }
   return picked;
 }
-function refreshButton(){
-  $('btn-up').disabled=!($('dir').files.length);
+function hasIndexHtml(picked){
+  return picked.some(p=>p.path==='index.html');
 }
-$('dir').addEventListener('change',refreshButton);
-$('btn-wipe').addEventListener('click',async()=>{
-  if(!confirm('确定清空设备上的 /frontend 目录？配置、学习记录与蓝牙密钥不受影响。'))return;
-  try{
-    const r=await fetch('/api/files?path='+encodeURIComponent(FS_ROOT),{method:'DELETE'});
-    if(!r.ok)throw new Error(await r.text());
-    say('已清空 '+FS_ROOT,'ok');
-    $('btn-wipe').textContent='已清空';
-    setTimeout(()=>{location.reload();},800);
-  }catch(e){say('清空失败: '+e.message,'err');}
-});
-$('btn-up').addEventListener('click',async()=>{
+async function startUpload(){
   const picked=collect();
-  if(!picked.length){say('没有可上传的文件','err');return;}
-  // 目录上传时先清空，避免旧构建的哈希文件残留占满空间
-  if($('dir').files.length){
-    say('先清空 '+FS_ROOT+' …');
-    const r=await fetch('/api/files?path='+encodeURIComponent(FS_ROOT),{method:'DELETE'});
-    if(!r.ok){say('清空失败，已中止上传: '+await r.text(),'err');return;}
+  if(!picked.length){say('没有选择任何文件','err');return;}
+  if(!hasIndexHtml(picked)){
+    say('所选目录不包含 index.html，请选择 web 构建产物（data/frontend）目录','err');
+    $('dir').value='';
+    return;
   }
   $('btn-up').disabled=true;
   $('bar-wrap').style.display='block';
+  say('检测到 index.html，先清空 '+FS_ROOT+' …');
+  try{
+    const r=await fetch('/api/files?path='+encodeURIComponent(FS_ROOT),{method:'DELETE'});
+    if(!r.ok){say('清空失败，已中止上传: '+await r.text(),'err');resetUI();return;}
+  }catch(e){say('清空失败: '+e.message,'err');resetUI();return;}
   let failed=0,bytes=0;
   for(let i=0;i<picked.length;i++){
     const {file,path}=picked[i];
@@ -161,15 +131,20 @@ $('btn-up').addEventListener('click',async()=>{
     }catch(e){failed++;say('✗ '+path+' — '+e.message,'err');}
     $('bar').style.width=Math.round((i+1)*100/picked.length)+'%';
   }
-  $('bar').style.display='none';
-  refreshButton();
+  resetUI();
   if(!failed){
     say('完成：'+picked.length+' 个文件，'+bytes+' 字节。正在刷新页面…','ok');
     setTimeout(()=>location.reload(),1200);
   }else{
-    say('有 '+failed+' 个文件失败，可在修好后单独重传。','err');
+    say('有 '+failed+' 个文件失败，可在修好后重新上传。','err');
   }
-});
+}
+function resetUI(){
+  $('btn-up').disabled=false;
+  $('bar').style.display='none';
+}
+$('btn-up').addEventListener('click',()=>$('dir').click());
+$('dir').addEventListener('change',startUpload);
 loadStatus();
 </script>
 </body>

@@ -144,8 +144,9 @@ static bool readablePath(const String& path) {
   return writablePath(path) || capturePath(path) || legacyAssetPath(path);
 }
 
-// 可写目标必须是 /frontend 下的某个文件，目录本身只能整块删除。
+// 可写目标：/frontend 下的某个文件，或 /captures/ 下的采样文件。
 static bool uploadPath(const String& path) {
+  if (capturePath(path)) return true;
   return path.length() > strlen(kFrontendRoot) && writablePath(path);
 }
 
