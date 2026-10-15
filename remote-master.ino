@@ -5,6 +5,7 @@
  * Upload data/ separately as a LittleFS image.
  */
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #define RAW_BUFFER_LENGTH 750
@@ -65,6 +66,21 @@ void pushState(int client = -1) {
   status["fsTotal"] = filesystemMounted ? LittleFS.totalBytes() : 0;
   status["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
   bleHostStatus(status["ble"].to<JsonObject>());
+  // WiFi 已连接设备
+  wifi_sta_list_t wifi_sta;
+  if (esp_wifi_ap_get_sta_list(&wifi_sta) == ESP_OK) {
+    JsonArray stations = status["wifiStations"].to<JsonArray>();
+    for (int i = 0; i < wifi_sta.num; i++) {
+      JsonObject sta = stations.add<JsonObject>();
+      char macStr[18];
+      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+               wifi_sta.sta[i].mac[0], wifi_sta.sta[i].mac[1],
+               wifi_sta.sta[i].mac[2], wifi_sta.sta[i].mac[3],
+               wifi_sta.sta[i].mac[4], wifi_sta.sta[i].mac[5]);
+      sta["mac"] = macStr;
+      sta["rssi"] = wifi_sta.sta[i].rssi;
+    }
+  }
   String message;
   serializeJson(doc, message);
   if (client < 0) sockets.broadcastTXT(message);

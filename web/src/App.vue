@@ -27,7 +27,6 @@ onMounted(() => device.connect());
     </header>
 
     <StatusChips />
-    <NoticeBar />
 
     <nav aria-label="功能">
       <RouterLink v-for="tab in tabs" :key="tab.name" :to="{name: tab.name}">
@@ -41,7 +40,7 @@ onMounted(() => device.connect());
         <component :is="Component" />
       </KeepAlive>
     </RouterView>
-
-    <footer>配置保存到 LittleFS · WebSocket 事件通信 · 不轮询设备</footer>
   </main>
+  <!-- Toast 提示：fixed 定位显示在页面顶部 -->
+  <NoticeBar />
 </template>

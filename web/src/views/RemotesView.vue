@@ -12,18 +12,32 @@ const {busy, run} = useAction();
 const remoteForm = reactive({id: '', name: '', transport: 'ir'});
 const keyForm = reactive({id: '', name: '', proto: '', code: ''});
 const selectedRemoteId = ref('');
-// 学习结果的归属遥控器。与 selectedRemoteId 分开记录，避免用户中途切换遥控器时
-// 把 A 遥控器的信号存到 B 名下。
 const learnedRemote = ref('');
 const captureId = ref('');
+
+// 模态框状态
+const modalOpen = ref(false);
+const modalMode = ref('create'); // 'create' | 'edit'
 
 const keysHere = computed(() => catalog.keysOfRemote(selectedRemoteId.value));
 const learningHere = computed(() => (
   Boolean(selectedRemoteId.value) && device.status.learningRemote === selectedRemoteId.value
 ));
 
-function resetRemoteForm() {
+function openCreateModal() {
+  modalMode.value = 'create';
   Object.assign(remoteForm, {id: '', name: '', transport: 'ir'});
+  modalOpen.value = true;
+}
+
+function openEditModal(remote) {
+  modalMode.value = 'edit';
+  Object.assign(remoteForm, {id: remote.id, name: remote.name, transport: remote.transport || 'ir'});
+  modalOpen.value = true;
+}
+
+function closeModal() {
+  modalOpen.value = false;
 }
 
 function resetKeyForm() {
@@ -33,7 +47,6 @@ function resetKeyForm() {
 }
 
 // 收到学习信号：填充按键表单；若同码按键已存在则进入"更新"模式。
-// 共码普遍存在，这里只提示而不阻止——重复学习会刷新它们共用的原始脉冲。
 watch(() => device.lastInput, input => {
   if (!input || input.remoteId !== selectedRemoteId.value) return;
 
@@ -65,7 +78,7 @@ async function submitRemote() {
       name: remoteForm.name.trim(),
       transport: remoteForm.transport,
     });
-    resetRemoteForm();
+    closeModal();
   }, '遥控器已保存');
 }
 
@@ -94,10 +107,6 @@ const startLearning = () => run(async () => {
 
 const stopLearning = () => run(() => catalog.stopLearning(), '已停止学习');
 
-function editRemote(remote) {
-  Object.assign(remoteForm, {id: remote.id, name: remote.name, transport: remote.transport || 'ir'});
-}
-
 function editKey(key) {
   selectedRemoteId.value = key.remoteId;
   Object.assign(keyForm, {id: key.id, name: key.name, proto: key.proto, code: key.code});
@@ -108,6 +117,10 @@ function editKey(key) {
 async function removeRemote(remote) {
   if (!confirm(`确定删除遥控器「${remote.name}」？需要先删除它下面的所有按键。`)) return;
   await run(() => catalog.remove('remotes', remote.id), '遥控器已删除');
+  if (selectedRemoteId.value === remote.id) {
+    selectedRemoteId.value = '';
+    resetKeyForm();
+  }
 }
 
 async function removeKey(key) {
@@ -118,60 +131,26 @@ async function removeKey(key) {
 
 <template>
   <section>
-    <div class="columns">
-      <article>
-        <h2>遥控器</h2>
-        <form @submit.prevent="submitRemote">
-          <label>遥控器名称
-            <input v-model="remoteForm.name" required maxlength="63" placeholder="例如：客厅遥控器">
-          </label>
-          <label>输入方式
-            <select v-model="remoteForm.transport">
-              <option value="ir">红外遥控器</option>
-              <option disabled>蓝牙遥控器（预留）</option>
-            </select>
-          </label>
-          <div class="actions">
-            <button :disabled="busy">保存遥控器</button>
-            <button type="button" class="secondary" :disabled="busy" @click="resetRemoteForm">新建</button>
-          </div>
-        </form>
-        <p class="hint">
-          不同遥控器允许学习出相同的红外码（多遥控器共码很常见）。执行时按列表顺序匹配第一个带映射的按键；
-          重新学习共码按键会同步更新它们共用的原始脉冲。
-        </p>
+    <article>
+      <h2>遥控器按键学习</h2>
 
-        <ItemCard
-          v-for="remote in catalog.remotes"
-          :key="remote.id"
-          :title="remote.name"
-          :disabled="busy"
-          @edit="editRemote(remote)"
-          @remove="removeRemote(remote)"
-        >
-          {{ remote.transport === 'ir' ? '红外' : '蓝牙' }}
-          · {{ catalog.keysOfRemote(remote.id).length }} 个按键
-          · {{ catalog.mappedCountOfRemote(remote.id) }} 个已映射
-        </ItemCard>
-        <p v-if="!catalog.remotes.length" class="hint">尚未定义遥控器</p>
-      </article>
-
-      <article>
-        <h2>学习按键</h2>
-        <label>当前遥控器
-          <select v-model="selectedRemoteId" @change="resetKeyForm">
-            <option value="">请选择</option>
-            <option v-for="remote in catalog.remotes" :key="remote.id" :value="remote.id">{{ remote.name }}</option>
-          </select>
-        </label>
+      <div class="remote-selector">
         <div class="actions">
-          <button :disabled="busy || !selectedRemoteId || learningHere" @click="startLearning">开始学习</button>
+          <select v-model="selectedRemoteId" class="remote-select">
+            <option value="">请选择遥控器</option>
+            <option v-for="remote in catalog.remotes" :key="remote.id" :value="remote.id">
+              {{ remote.name }}（{{ catalog.keysOfRemote(remote.id).length }} 键）
+            </option>
+          </select>
+          <button class="secondary" @click="openCreateModal">添加遥控器</button>
+        </div>
+      </div>
+
+      <div v-if="selectedRemoteId" class="learning-section">
+        <div class="actions">
+          <button :disabled="busy || learningHere" @click="startLearning">开始学习</button>
           <button class="secondary" :disabled="busy" @click="stopLearning">停止学习</button>
         </div>
-        <p class="hint">
-          选择遥控器后按实体按键；收到信号后命名保存，可连续学习多个按键。完整原始脉冲会随按键保存，
-          供红外重放使用；接收器不能测量载波频率。空闲 5 分钟自动停止。
-        </p>
 
         <form @submit.prevent="submitKey">
           <label>按键名称
@@ -198,7 +177,56 @@ async function removeKey(key) {
           <template v-else-if="catalog.mappingOf(key.id)"> · 已映射</template>
         </ItemCard>
         <p v-if="!keysHere.length" class="hint">该遥控器尚无按键，开始学习后按实体遥控器按键</p>
-      </article>
-    </div>
+      </div>
+
+      <p v-else class="hint">请先选择一个遥控器，或点击"添加遥控器"创建新的遥控器</p>
+    </article>
+
+    <!-- 遥控器列表 -->
+    <article v-if="catalog.remotes.length">
+      <h3>已定义遥控器</h3>
+      <div class="remote-list">
+        <div
+          v-for="remote in catalog.remotes"
+          :key="remote.id"
+          class="remote-chip"
+          :class="{active: remote.id === selectedRemoteId}"
+          @click="selectedRemoteId = remote.id; resetKeyForm()"
+        >
+          <span class="remote-chip-name">{{ remote.name }}</span>
+          <span class="remote-chip-meta">
+            {{ remote.transport === 'ir' ? '红外' : '蓝牙' }} · {{ catalog.keysOfRemote(remote.id).length }} 键
+          </span>
+          <span class="remote-chip-actions">
+            <button class="secondary" @click.stop="openEditModal(remote)">编辑</button>
+            <button class="danger" @click.stop="removeRemote(remote)">删除</button>
+          </span>
+        </div>
+      </div>
+    </article>
+
+    <!-- 模态框：添加/编辑遥控器 -->
+    <Teleport to="body">
+      <div v-if="modalOpen" class="modal-backdrop" @click.self="closeModal">
+        <div class="modal">
+          <h3>{{ modalMode === 'edit' ? '编辑遥控器' : '添加遥控器' }}</h3>
+          <form @submit.prevent="submitRemote">
+            <label>遥控器名称
+              <input v-model="remoteForm.name" required maxlength="63" placeholder="例如：客厅遥控器" autofocus>
+            </label>
+            <label>输入方式
+              <select v-model="remoteForm.transport">
+                <option value="ir">红外遥控器</option>
+                <option disabled>蓝牙遥控器（预留）</option>
+              </select>
+            </label>
+            <div class="modal-actions">
+              <button :disabled="busy" type="submit">{{ modalMode === 'edit' ? '保存' : '添加' }}</button>
+              <button class="secondary" type="button" @click="closeModal">取消</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Teleport>
   </section>
 </template>

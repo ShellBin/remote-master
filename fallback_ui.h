@@ -8,7 +8,7 @@ static const char kFallbackHtml[] PROGMEM = R"HTML(<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IR Keyboard — 设备就绪</title>
+<title>Remote Master — 设备就绪</title>
 <style>
   :root{--bg:#0f1115;--panel:#1a1d24;--line:#2a2e38;--fg:#e6e6e6;--muted:#8a8f99;--accent:#4f8cff;--ok:#34c759;--warn:#ff9f0a;--err:#ff6b6b}
   *{box-sizing:border-box}
@@ -48,7 +48,7 @@ static const char kFallbackHtml[] PROGMEM = R"HTML(<!DOCTYPE html>
 </head>
 <body>
 <div class="wrap">
-  <h1>IR Keyboard</h1>
+  <h1>Remote Master</h1>
   <div class="sub">ESP32-C3 BLE/IR 多功能遥控平台 — 固件运行正常，前端尚未部署</div>
 
   <div class="card">

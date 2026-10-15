@@ -38,7 +38,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .group{margin-top:10px}
 .group h3{margin:18px 0 0;color:var(--text);text-transform:none;letter-spacing:0;font-size:15px}
 .group h3 small{margin-left:10px;font-weight:400}
-.chips{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 0}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
 .chip{border:1px solid var(--line);background:#141f31;padding:5px 12px;border-radius:18px;font-size:13px;color:var(--muted)}
 .chip.ok{border-color:var(--ok);color:var(--ok)}
 .chip.learn{border-color:var(--warn);color:var(--warn)}
@@ -51,9 +51,92 @@ input[type=checkbox]{accent-color:var(--accent)}
 .storage strong{color:var(--text)}
 .bar{height:8px;background:#101b2c;border:1px solid var(--line);border-radius:6px;margin-top:10px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--accent)}
-.notice{min-height:26px;color:#ffcb70;margin:12px 0}
-.notice.error{color:#ff9b9b}
+/* Toast 提示样式 */
+.toast{
+  position:fixed;
+  top:16px;
+  left:50%;
+  transform:translateX(-50%);
+  z-index:1000;
+  padding:12px 24px;
+  border-radius:8px;
+  font-size:14px;
+  font-weight:500;
+  color:#1a1a1a;
+  background:#69d3bd;
+  box-shadow:0 4px 20px rgba(0,0,0,0.3);
+  white-space:nowrap;
+  max-width:90vw;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.toast.toast-enter-error{
+  background:#ff9b9b;
+  color:#1a1a1a;
+}
+
+/* Toast 动画 */
+.toast-enter-active{
+  transition:all 0.3s ease-out;
+}
+.toast-leave-active{
+  transition:all 0.3s ease-in;
+}
+.toast-enter-from{
+  opacity:0;
+  transform:translateX(-50%) translateY(-100%);
+}
+.toast-leave-to{
+  opacity:0;
+  transform:translateX(-50%) translateY(-100%);
+}
 .connection{border:1px solid var(--line);padding:6px 12px;border-radius:20px;font-size:13px;color:var(--muted)}
 footer{margin:24px 0;text-align:center;font-size:12px}
+/* WiFi 已连接设备 */
+.stations{margin:8px 0}
+.station-item{display:flex;gap:12px;align-items:center;padding:8px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+.station-item:first-child{border-top:0}
+.station-mac{font-family:monospace;font-size:13px;color:var(--text)}
+.station-ip,.station-rssi{font-size:12px;color:var(--muted)}
+.station-count{display:inline-block;background:var(--accent);color:#06231c;font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px;margin-left:8px;vertical-align:1px}
+
+/* 蓝牙状态网格 */
+.ble-status{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
+.ble-status-item{display:flex;flex-direction:column;gap:2px;padding:8px 10px;background:#141f31;border:1px solid var(--line);border-radius:6px}
+.ble-status-label{font-size:11px;color:var(--muted);text-transform:none}
+.ble-status-value{font-size:13px;font-weight:500;color:var(--text)}
+.ble-status-value.ok{color:var(--ok)}
+.ble-status-value.warn{color:var(--muted)}
+
+/* 蓝牙主机卡片 */
+.host-card{background:#182437;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:12px 0}
+.host-card-header{padding:12px 16px;background:#141f31;border-bottom:1px solid var(--line)}
+.host-card-address{font-family:monospace;font-size:14px;font-weight:500;color:var(--text)}
+.host-card-body{padding:12px 16px 0}
+.host-card-body label{margin:0;font-size:13px;color:var(--muted)}
+.host-card-body input{margin-top:4px}
+.host-card-actions{display:flex;gap:8px;flex-wrap:wrap;padding:12px 16px}
+
+/* 遥控器选择器 */
+.remote-selector{margin-bottom:16px}
+.remote-select{min-width:200px;flex:1}
+
+/* 遥控器列表 */
+.remote-list{display:grid;gap:10px;margin-top:12px}
+.remote-chip{display:flex;align-items:center;gap:12px;padding:12px 16px;background:#182437;border:1px solid var(--line);border-radius:10px;cursor:pointer;transition:border-color .15s,background .15s;flex-wrap:wrap}
+.remote-chip:hover{border-color:var(--accent)}
+.remote-chip.active{border-color:var(--accent);background:#1a2a42}
+.remote-chip-name{font-weight:500;color:var(--text)}
+.remote-chip-meta{font-size:13px;color:var(--muted)}
+.remote-chip-actions{display:flex;gap:6px;margin-left:auto}
+
+/* 模态框 */
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:1000;padding:20px}
+.modal{background:#182437;border:1px solid var(--line);border-radius:12px;padding:24px;width:100%;max-width:420px;box-shadow:0 8px 40px rgba(0,0,0,.5)}
+.modal h3{margin:0 0 16px;font-size:16px}
+.modal-actions{display:flex;gap:8px;margin-top:20px}
+.modal-actions button{flex:1}
+
+.learning-section{margin-top:16px}
 [hidden]{display:none!important}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
