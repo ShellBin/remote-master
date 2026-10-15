@@ -70,6 +70,12 @@ export default defineConfig(({mode}) => {
 
     server: {
       port: 5173,
+      // 项目位于 /Volumes/Macintosh HD/... 下，fsevents 在该挂载路径下
+      // 不能可靠触发文件变更事件，导致 HMR 失效。启用轮询作为兜底。
+      watch: {
+        usePolling: true,
+        interval: 100,
+      },
       // 开发时前端跑在本机，接口与事件通道都由 dev server 转给真机：
       //   localhost:5173/api/*  →  192.168.4.1/api/*      （HTTP）
       //   localhost:5173/ws     →  192.168.4.1:81/        （WebSocket）

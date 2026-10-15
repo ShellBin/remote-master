@@ -5,8 +5,6 @@
 //   node deploy.mjs http://192.168.4.1                # 指定设备地址
 //   node deploy.mjs --dir ./dist --remote frontend    # 上传其它目录
 //   node deploy.mjs --no-clean                        # 保留设备上已有的文件
-//   node deploy.mjs --initialize                      # 设备未初始化时直接格式化（跳过询问）
-//   node deploy.mjs --no-wait                         # 配置存储未就绪时不等待重启
 //
 // --remote 的前导斜杠可省略（脚本会补上）：在 Git Bash 里写 /frontend 会被 shell
 // 转换成 C:/... 之类的 Windows 路径，脚本检测到这种情况会直接报错停下。
@@ -18,17 +16,17 @@
 // 设备侧规则：/frontend 的目录结构与 URL 根路径 1:1 对应。
 // 因此 data/frontend/index.html 会以 /frontend/index.html 落盘，并可通过
 // GET /index.html 访问。
+//
+// 文件系统初始化由固件在上电时自动完成（未挂载或配置不兼容时直接格式化），
+// 本脚本不再负责格式化——连接上设备时 FS 必然已就绪。
 
 import {readdir, readFile, stat} from 'node:fs/promises';
 import {dirname, join, resolve, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {createInterface} from 'node:readline/promises';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FS_ROOT = '/frontend';
 const DEFAULT_ADDRESS = 'http://192.168.4.1';
-// 配置存储只在固件 setup() 里加载，而固件没有重启接口——所以只能等用户复位。
-const STORAGE_WAIT_MS = 60000;
 const PROBE_ATTEMPTS = 3;
 
 function usage() {
@@ -38,8 +36,6 @@ function usage() {
   --dir <路径>       要上传的本地目录（默认: ${join(HERE, 'data')}）
   --remote <前缀>    设备侧目标前缀，前导斜杠可省略（默认: /）
   --no-clean         不预先清空目标目录，仅覆盖同名文件
-  --initialize       设备未初始化时直接格式化，不询问（会清空设备数据）
-  --no-wait          配置存储未就绪时立即继续，不等待设备重启
   --help             显示本帮助
 
 示例:
@@ -68,8 +64,6 @@ for (let i = 0; i < args.length; i++) {
 
 const localDir = resolve(flagValue('--dir') ?? join(HERE, 'data'));
 const clean = !args.includes('--no-clean');
-const assumeYes = args.includes('--initialize');
-const waitForStorage = !args.includes('--no-wait');
 const remotePrefix = normalizePrefix(flagValue('--remote') ?? '/');
 
 // ---------------------------------------------------------------- 设备地址
@@ -157,18 +151,6 @@ async function requestOk(path, options = {}) {
   return response;
 }
 
-async function confirm(question) {
-  const rl = createInterface({input: process.stdin, output: process.stdout});
-  try {
-    const answer = await rl.question(`${question} [y/N] `);
-    return /^y(es)?$/i.test(answer.trim());
-  } catch {
-    return false;
-  } finally {
-    rl.close();
-  }
-}
-
 // .DS_Store / __MACOSX 之类无用文件不应占用 LittleFS 空间
 function skip(relativePath) {
   const parts = relativePath.split(sep);
@@ -210,7 +192,7 @@ async function probeStatus(attempts = PROBE_ATTEMPTS) {
   throw new Error(
     `无法连接设备 ${url.origin}（${describeError(lastError)}）\n` +
     '  排查顺序：\n' +
-    '    1. 电脑是否已连上设备热点（名称可在前端「系统」页修改，出厂默认 IR-C3-Remote）；\n' +
+    '    1. 电脑是否已连上设备热点（名称可在前端「系统」页修改，出厂默认 Remote Master）；\n' +
     `    2. 地址是否正确 —— 设备作为热点时固定是 ${DEFAULT_ADDRESS}（当前用 ${addressFrom} 的 ${base}）；\n` +
     '    3. 设备是否已上电（刚复位时约需 2~3 秒）。\n' +
     `  可先单独验证连通性：curl ${url.origin}/api/status`,
@@ -225,63 +207,16 @@ function describeStatus(status) {
   return `${fs} · ${store}`;
 }
 
-// 设备未初始化 = 从没挂载过 LittleFS（新烧固件的首次使用，或分区被擦过）。
-// 固件只在"未挂载"时接受格式化，已挂载时会返回 409 拒绝，所以这里不会误擦数据。
-async function initializeFilesystem() {
-  console.log('检测到设备尚未初始化（LittleFS 未挂载）。');
-  if (!assumeYes) {
-    if (!process.stdin.isTTY) {
-      throw new Error('设备未初始化。非交互环境请显式加 --initialize（会格式化设备文件系统）。');
-    }
-    const ok = await confirm('现在格式化设备文件系统？这会清空设备上已有的配置与学习记录。');
-    if (!ok) throw new Error('已取消。设备未初始化，前端无法上传。');
-  } else {
-    console.log('--initialize：跳过询问，直接格式化。');
-  }
-  const result = await (await requestOk('/api/fs/initialize?confirm=INITIALIZE_EMPTY_FILESYSTEM', {method: 'POST'})).json();
-  if (!result.ok) throw new Error(`初始化失败：${result.error || '未知原因'}`);
-  console.log('文件系统已格式化并挂载。');
-}
-
-async function awaitStorageReady(status) {
-  if (!waitForStorage) {
-    console.log('配置存储未就绪，已按 --no-wait 跳过等待。');
-    return status;
-  }
-  console.log('配置存储未就绪：固件在启动时才加载它，请按一下设备的复位键（或断电重上）。');
-  const deadline = Date.now() + STORAGE_WAIT_MS;
-  let waited = 0;
-  while (Date.now() < deadline) {
-    await sleep(2000);
-    waited += 2;
-    try {
-      const fresh = await fetchStatus(3000);
-      if (fresh.storageReady) {
-        progressEnd();
-        console.log(`配置存储已就绪（等待 ${waited} 秒）。`);
-        return fresh;
-      }
-    } catch {
-      // 重启过程中必然连不上，属于预期
-    }
-    progress(`等待设备重启… 已等待 ${waited}s / ${STORAGE_WAIT_MS / 1000}s`);
-  }
-  progressEnd();
-  console.log(`等待超时（${STORAGE_WAIT_MS / 1000} 秒），配置存储仍未就绪。`);
-  console.log('  · 设备若已重启仍是这个状态，多半是 remote-config.json 损坏 —— 重启不会自愈；');
-  console.log('  · 前端资源与配置存储互相独立，先继续上传；配置类操作要等它就绪。');
-  return status;
-}
-
-// 检测 + 自动修复，返回设备就绪后的状态。
-async function ensureInitialized() {
-  let status = await probeStatus();
+// 固件上电时自动完成 FS 初始化与配置加载，这里只做连通性与就绪状态确认。
+async function probeDevice() {
+  const status = await probeStatus();
   console.log(`设备状态：${describeStatus(status)}`);
   if (!status.filesystemMounted) {
-    await initializeFilesystem();
-    status = await probeStatus(); // 格式化后 filesystemMounted 立即为 true
+    throw new Error('设备文件系统未挂载——固件应在上电时自动初始化，请复位设备后重试。');
   }
-  if (!status.storageReady) status = await awaitStorageReady(status);
+  if (!status.storageReady) {
+    console.warn('注意：配置存储未就绪，保存类操作可能失败。');
+  }
   return status;
 }
 
@@ -305,7 +240,7 @@ try {
   console.log(`设备地址 ${url.origin}（来自${addressFrom}）`);
   console.log(`待上传 ${files.length} 个文件，共 ${kb(totalBytes)} → ${remotePrefix}`);
 
-  const status = await ensureInitialized();
+  const status = await probeDevice();
 
   // 只清理这次要写入的顶层目录，且必须落在 /frontend 之内。
   if (clean) {
@@ -359,9 +294,6 @@ try {
       }
     }
     console.log(`部署完成 → ${url.origin}/`);
-    if (!status.storageReady) {
-      console.warn('注意：配置存储未就绪，设备重启前页面上的保存类操作都会失败。');
-    }
   }
 } catch (error) {
   console.error(`部署中止：${error.message}`);

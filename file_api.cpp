@@ -197,6 +197,7 @@ static void appendFiles(JsonArray out, size_t& count) {
 
 // 递归清空目录：每轮只开一个目录句柄并取第一个子项，删除后重新扫描。
 // 边删边扫的写法让目录内容多少都不占用堆内存，同时句柄占用恒定为 2。
+// 目录本身用 rmdir 删除（空目录），remove 在部分版本的 LittleFS 上对目录不可靠。
 static bool clearDirectory(const String& path, uint8_t depth) {
   File entry = LittleFS.open(path);
   if (!entry) return true;  // 已不存在，视为成功
@@ -221,12 +222,15 @@ static bool clearDirectory(const String& path, uint8_t depth) {
     if (isDirectory) {
       if (!clearDirectory(childPath, depth + 1)) return false;
     } else if (!LittleFS.remove(childPath)) {
-      // esp_littlefs 的 readdir 会过滤 "." 与 ".."，这里删不掉就说明文件系统
-      // 状态异常；直接失败而不是重试，避免"取第一项 → 删不掉 → 再取第一项"空转。
+      Serial.printf("[FS] remove file failed: %s\n", childPath.c_str());
       return false;
     }
   }
-  return LittleFS.remove(path);
+  if (!LittleFS.rmdir(path) && !LittleFS.remove(path)) {
+    Serial.printf("[FS] rmdir failed: %s\n", path.c_str());
+    return false;
+  }
+  return true;
 }
 
 // LittleFS 的 mkdir 对已存在的目录返回 true，因此无需先 exists() 判断。
@@ -322,7 +326,7 @@ static void handleDelete(const String& path) {
     return;
   }
   if (!clearDirectory(path, 0)) {
-    sendError(500, "Delete failed; directory may be nested too deeply");
+    sendError(500, "Delete failed; check serial log for details");
     return;
   }
   JsonDocument doc;
@@ -401,7 +405,10 @@ static void serveFallbackLanding() {
   webServer->send_P(200, "text/html; charset=utf-8", kFallbackHtml);
 }
 
-// 未命中任何显式路由时调用。API 路径返回 404，其余按静态资源处理。
+// 静态资源下发：/frontend 目录映射到 URL 根路径，未命中时回退入口页。
+// 设备上只保留 .gz 压缩版（构建时删除原文件），因此若客户端不支持 gzip
+// 则返回 406。openAsset 优先返回 .gz；若某文件未压缩（过小/收益不足）
+// 则返回原文件，encoded=false。
 void fileApiServeStatic(const String& uri) {
   if (!webServer) return;
   if (webServer->method() != HTTP_GET && webServer->method() != HTTP_HEAD) {
@@ -434,14 +441,23 @@ void fileApiServeStatic(const String& uri) {
     return;
   }
 
+  // 不支持 gzip 的客户端退回原文件（设备上 .gz 与原文件同时保留）。
+  bool acceptGzip = webServer->hasHeader("Accept-Encoding") &&
+                    webServer->header("Accept-Encoding").indexOf("gzip") >= 0;
+  if (encoded && !acceptGzip) {
+    file.close();
+    file = LittleFS.open(String(kFrontendRoot) + relative, "r");
+    if (!file) {
+      sendError(404, "Asset not found; deploy the frontend first");
+      return;
+    }
+    encoded = false;
+  }
+
   bool immutable = relative.startsWith("/assets/");
   webServer->sendHeader("Cache-Control", immutable ? "public, max-age=31536000, immutable" : "no-cache");
   webServer->sendHeader("X-Content-Type-Options", "nosniff");
-  // 仅在客户端声明支持时才下发压缩版本，避免不支持 gzip 的客户端拿到乱码。
-  if (encoded &&
-      webServer->hasHeader("Accept-Encoding") &&
-      webServer->header("Accept-Encoding").indexOf("gzip") >= 0)
-    webServer->sendHeader("Content-Encoding", "gzip");
+  if (encoded) webServer->sendHeader("Content-Encoding", "gzip");
   webServer->streamFile(file, mimeFor(relative));
   file.close();
 }
@@ -492,23 +508,5 @@ void fileApiBegin(WebServer& server) {
       return;
     }
     handleDelete(webServer->arg("path"));
-  });
-
-  server.on("/api/fs/initialize", HTTP_POST, [] {
-    if (mounted) {
-      sendError(409, "Already mounted; formatting refused");
-      return;
-    }
-    // 仅在首次启用时显式格式化；任何情况下都不会自动格式化。
-    if (webServer->arg("confirm") != "INITIALIZE_EMPTY_FILESYSTEM") {
-      sendError(400, "Explicit initialization confirmation required");
-      return;
-    }
-    mounted = LittleFS.format() && LittleFS.begin(false);
-    JsonDocument doc;
-    doc["ok"] = mounted;
-    if (mounted) doc["restartRequired"] = true;
-    else doc["error"] = "Initialization failed";
-    sendJson(mounted ? 200 : 500, doc);
   });
 }

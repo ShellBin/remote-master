@@ -17,111 +17,10 @@ static String newId() {
   return String(next);
 }
 
-// ---------- 设备设置（热点 / 蓝牙名称 / 信号过滤） ----------
-
-static const char* kDefaultApSsid = "IR-C3-Remote";
-static const char* kDefaultApPassword = "irremote123";
-static const char* kDefaultBleName = "ESP32-C3 IR Remote";
-
-void ensureDefaultSettings() {
-  JsonObject settings = remoteConfig["settings"].to<JsonObject>();
-  String ssid = settings["apSsid"] | "";
-  String password = settings["apPassword"] | "";
-  String name = settings["bleName"] | "";
-  if (ssid.isEmpty() || ssid.length() > 31) settings["apSsid"] = kDefaultApSsid;
-  if (password.length() < 8 || password.length() > 63) settings["apPassword"] = kDefaultApPassword;
-  if (name.isEmpty() || name.length() > 29) settings["bleName"] = kDefaultBleName;
-  if (!settings["minPulses"].is<int>() || settings["minPulses"].as<int>() < 0 ||
-      settings["minPulses"].as<int>() > 750)
-    settings["minPulses"] = 8;
-}
-
-// 红外序列宏：只允许“红外重放 + 等待”步骤，且每个重放步骤引用的
-// 按键必须存在并带有已保存的原始脉冲。
-static bool irMacroUsable(JsonArrayConst steps, String& error) {
-  if (steps.isNull() || steps.size() == 0) {
-    error = "IR sequence macro has no steps"; return false;
-  }
-  for (JsonObjectConst step : steps) {
-    const char* kind = step["kind"] | "";
-    if (strcmp(kind, "wait") == 0) continue;
-    if (strcmp(kind, "ir") != 0) {
-      error = "IR sequence macros may only contain IR replay and wait steps"; return false;
-    }
-    JsonObject key = findItem("keys", step["keyId"].as<String>());
-    String capture = key.isNull() ? "" : (key["capturePath"] | "");
-    if (key.isNull() || capture.isEmpty()) {
-      error = "IR step references a key without captured pulses"; return false;
-    }
-  }
-  return true;
-}
-
-static bool settingsCommand(const String& verb, JsonObjectConst args, String& error) {
-  if (verb != "save") { error = "Unknown operation"; return false; }
-  String apSsid, apPassword, bleName;
-  int minPulses = -1;
-  bool hasSsid = !args["apSsid"].isNull(), hasPassword = !args["apPassword"].isNull();
-  bool hasName = !args["bleName"].isNull(), hasMinPulses = !args["minPulses"].isNull();
-  if (hasSsid) {
-    apSsid = args["apSsid"].as<String>();
-    if (apSsid.isEmpty() || apSsid.length() > 31) {
-      error = "AP SSID must be 1-31 bytes"; return false;
-    }
-  }
-  if (hasPassword) {
-    apPassword = args["apPassword"].as<String>();
-    if (apPassword.length() < 8 || apPassword.length() > 63) {
-      error = "AP password must be 8-63 bytes"; return false;
-    }
-  }
-  if (hasName) {
-    bleName = args["bleName"].as<String>();
-    if (bleName.isEmpty() || bleName.length() > 29) {
-      error = "BLE name must be 1-29 bytes"; return false;
-    }
-  }
-  if (hasMinPulses) {
-    if (!args["minPulses"].is<int>()) { error = "minPulses must be an integer"; return false; }
-    minPulses = args["minPulses"].as<int>();
-    if (minPulses < 0 || minPulses > 750) { error = "minPulses must be 0-750"; return false; }
-  }
-  if (!hasSsid && !hasPassword && !hasName && !hasMinPulses) {
-    error = "No settings provided"; return false;
-  }
-  JsonObject settings = remoteConfig["settings"].to<JsonObject>();
-  if (hasSsid) settings["apSsid"] = apSsid;
-  if (hasPassword) settings["apPassword"] = apPassword;
-  if (hasName) settings["bleName"] = bleName;
-  if (hasMinPulses) settings["minPulses"] = minPulses;
-  return !remoteConfig.overflowed();
-}
-
-bool saveRemoteConfig() {
-  if (remoteConfig.overflowed() || measureJson(remoteConfig) > 32768) return false;
-  File file = LittleFS.open("/remote-config.tmp", "w");
-  if (!file) return false;
-  size_t written = serializeJson(remoteConfig, file);
-  file.flush();
-  file.close();
-  if (written != measureJson(remoteConfig)) return false;
-  return LittleFS.rename("/remote-config.tmp", kConfigFile);
-}
-
-bool remoteStoreBegin() {
-  File file = LittleFS.open(kConfigFile, "r");
-  if (file) {
-    auto err = deserializeJson(remoteConfig, file);
-    file.close();
-    if (err || remoteConfig["version"] != 2) return false;
-    for (const char* name : {"remotes", "keys", "macros", "mappings", "hosts"}) {
-      size_t limit = strcmp(name, "hosts") == 0 ? 8 : strcmp(name, "remotes") == 0 ? 12 : 50;
-      if (!remoteConfig[name].is<JsonArray>() || remoteConfig[name].size() > limit) return false;
-    }
-    if (measureJson(remoteConfig) > 32768) return false;
-    ensureDefaultSettings();
-    return true;
-  }
+// 从零构造一份默认配置：版本号、空集合、默认设置，以及可选的出厂绑定导入。
+// remoteStoreBegin（文件不存在时）与 remoteStoreFactoryReset 共用此路径。
+static void resetRemoteConfig() {
+  remoteConfig.clear();
   remoteConfig["version"] = 2;
   remoteConfig["nextId"] = 1;
   for (const char* name : {"remotes", "keys", "macros", "mappings", "hosts"})
@@ -163,6 +62,131 @@ bool remoteStoreBegin() {
     for (uint8_t i = 0; i < bindingCount; ++i) bindings[i] = Binding{};
     bindingCount = 0;
   }
+}
+
+// ---------- 设备设置（热点 / 蓝牙名称 / 信号过滤） ----------
+
+static const char* kDefaultApSsid = "Remote Master";
+static const char* kDefaultApPassword = "";
+static const char* kDefaultBleName = "Remote Master";
+
+void ensureDefaultSettings() {
+  JsonObject settings = remoteConfig["settings"].to<JsonObject>();
+  String ssid = settings["apSsid"] | "";
+  String password = settings["apPassword"] | "";
+  String name = settings["bleName"] | "";
+  if (ssid.isEmpty() || ssid.length() > 31) settings["apSsid"] = kDefaultApSsid;
+  // 密码允许为空（开放 AP），或 8-63 字节（WPA2）。1-7 位对 WPA2 无效，回退默认（开放）。
+  if (!password.isEmpty() && (password.length() < 8 || password.length() > 63))
+    settings["apPassword"] = kDefaultApPassword;
+  if (name.isEmpty() || name.length() > 29) settings["bleName"] = kDefaultBleName;
+  if (!settings["minPulses"].is<int>() || settings["minPulses"].as<int>() < 0 ||
+      settings["minPulses"].as<int>() > 750)
+    settings["minPulses"] = 8;
+}
+
+// 红外序列宏：只允许“红外重放 + 等待”步骤，且每个重放步骤引用的
+// 按键必须存在并带有已保存的原始脉冲。
+static bool irMacroUsable(JsonArrayConst steps, String& error) {
+  if (steps.isNull() || steps.size() == 0) {
+    error = "IR sequence macro has no steps"; return false;
+  }
+  for (JsonObjectConst step : steps) {
+    const char* kind = step["kind"] | "";
+    if (strcmp(kind, "wait") == 0) continue;
+    if (strcmp(kind, "ir") != 0) {
+      error = "IR sequence macros may only contain IR replay and wait steps"; return false;
+    }
+    JsonObject key = findItem("keys", step["keyId"].as<String>());
+    String capture = key.isNull() ? "" : (key["capturePath"] | "");
+    if (key.isNull() || capture.isEmpty()) {
+      error = "IR step references a key without captured pulses"; return false;
+    }
+  }
+  return true;
+}
+
+static bool settingsCommand(const String& verb, JsonObjectConst args, String& error) {
+  if (verb != "save") { error = "Unknown operation"; return false; }
+  String apSsid, apPassword, bleName;
+  int minPulses = -1;
+  bool hasSsid = !args["apSsid"].isNull(), hasPassword = !args["apPassword"].isNull();
+  bool hasName = !args["bleName"].isNull(), hasMinPulses = !args["minPulses"].isNull();
+  if (hasSsid) {
+    apSsid = args["apSsid"].as<String>();
+    if (apSsid.isEmpty() || apSsid.length() > 31) {
+      error = "AP SSID must be 1-31 bytes"; return false;
+    }
+  }
+  if (hasPassword) {
+    apPassword = args["apPassword"].as<String>();
+    // 允许空字符串（开放 AP）或 8-63 字节（WPA2 要求）。
+    if (!apPassword.isEmpty() && (apPassword.length() < 8 || apPassword.length() > 63)) {
+      error = "AP password must be empty (open AP) or 8-63 bytes"; return false;
+    }
+  }
+  if (hasName) {
+    bleName = args["bleName"].as<String>();
+    if (bleName.isEmpty() || bleName.length() > 29) {
+      error = "BLE name must be 1-29 bytes"; return false;
+    }
+  }
+  if (hasMinPulses) {
+    if (!args["minPulses"].is<int>()) { error = "minPulses must be an integer"; return false; }
+    minPulses = args["minPulses"].as<int>();
+    if (minPulses < 0 || minPulses > 750) { error = "minPulses must be 0-750"; return false; }
+  }
+  if (!hasSsid && !hasPassword && !hasName && !hasMinPulses) {
+    error = "No settings provided"; return false;
+  }
+  JsonObject settings = remoteConfig["settings"].to<JsonObject>();
+  if (hasSsid) settings["apSsid"] = apSsid;
+  if (hasPassword) settings["apPassword"] = apPassword;
+  if (hasName) settings["bleName"] = bleName;
+  if (hasMinPulses) settings["minPulses"] = minPulses;
+  return !remoteConfig.overflowed();
+}
+
+bool saveRemoteConfig() {
+  if (remoteConfig.overflowed() || measureJson(remoteConfig) > 32768) return false;
+  File file = LittleFS.open("/remote-config.tmp", "w");
+  if (!file) return false;
+  size_t written = serializeJson(remoteConfig, file);
+  file.flush();
+  file.close();
+  if (written != measureJson(remoteConfig)) return false;
+  return LittleFS.rename("/remote-config.tmp", kConfigFile);
+}
+
+bool remoteStoreBegin() {
+  File file = LittleFS.open(kConfigFile, "r");
+  if (file) {
+    auto err = deserializeJson(remoteConfig, file);
+    file.close();
+    // 不做版本向下兼容。仅当 JSON 解析失败、集合结构非法（非数组或超出
+    // 条目上限）或体积超过 32KB 时视为致命问题，由调用方格式化 FS。
+    if (err) return false;
+    for (const char* name : {"remotes", "keys", "macros", "mappings", "hosts"}) {
+      size_t limit = strcmp(name, "hosts") == 0 ? 8 : strcmp(name, "remotes") == 0 ? 12 : 50;
+      if (!remoteConfig[name].is<JsonArray>() || remoteConfig[name].size() > limit) return false;
+    }
+    if (measureJson(remoteConfig) > 32768) return false;
+    ensureDefaultSettings();
+    return true;
+  }
+  resetRemoteConfig();
+  return saveRemoteConfig();
+}
+
+// 恢复初始状态：格式化整个文件系统（清空前端、配置、红外采样与出厂绑定），
+// 重新挂载并重建 /frontend 目录与默认配置。BLE 配对由调用方（bleClearAllBonds）
+// 负责清除。格式化后前端页面不可用，用户需重新上传前端产物。
+bool remoteStoreFactoryReset() {
+  LittleFS.end();
+  if (!LittleFS.format()) return false;
+  if (!LittleFS.begin(false)) return false;
+  LittleFS.mkdir("/frontend");
+  resetRemoteConfig();
   return saveRemoteConfig();
 }
 
@@ -352,10 +376,9 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {
     // Identity and bond information cannot be supplied by the browser.
     obj["address"] = existing["address"];
     obj["addressType"] = existing["addressType"];
-    if (!obj["priority"].is<int>() || obj["priority"].as<int>() < 0 ||
-        obj["priority"].as<int>() > 99 || !obj["enabled"].is<bool>()) {
-      error = "Invalid host priority or enabled flag"; return false;
-    }
+    // priority / enabled 不再影响重连逻辑，保留字段仅作显示兼容
+    if (!obj["priority"].is<int>()) obj["priority"] = 0;
+    if (!obj["enabled"].is<bool>()) obj["enabled"] = true;
   }
   obj["id"] = id.isEmpty() ? newId() : id;
   obj.remove("captureId");

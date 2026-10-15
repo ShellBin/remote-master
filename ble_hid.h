@@ -16,7 +16,12 @@ void tickBleHosts();
 void bleHostStatus(JsonObject obj);
 void blePairingOpen();
 bool bleHostForget(const char* address, uint8_t addressType);
-void bleReconnectHosts();
+
+// 清除所有已配对主机的 BLE 绑定信息（恢复初始状态时调用）
+void bleClearAllBonds();
+
+// 尝试重连指定主机（address + addressType），用于用户从页面选择历史设备
+bool bleReconnectToHost(const String& address, uint8_t addressType);
 
 // 发送原始 HID 键码（不做 ASCII 转换）
 void sendRawKey(uint8_t key, uint8_t modifiers);

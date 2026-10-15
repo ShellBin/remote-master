@@ -16,7 +16,7 @@ static const uint8_t kAsciiToHid[128][2] = {
   {44,0},{30,2},{52,2},{32,2},{33,2},{34,2},{36,2},{52,0},  //  !"#$%&'
   {38,2},{39,2},{37,2},{46,2},{54,0},{45,0},{55,0},{56,0},  // ()*+,-./
   {39,0},{30,0},{31,0},{32,0},{33,0},{34,0},{35,0},{36,0},  // 01234567
-  {37,0},{38,0},{51,2},{51,0},{54,2},{46,0},{55,2},{56,2},  // 89:;<=>?
+  {37,0},{38,0},{51,2},{51,0},{54,2},{55,2},{56,2},  // 89:;<=>?
   {31,2},{4,2},{5,2},{6,2},{7,2},{8,2},{9,2},{10,2},  // @ABCDEFG
   {11,2},{12,2},{13,2},{14,2},{15,2},{16,2},{17,2},{18,2},  // HIJKLMNO
   {19,2},{20,2},{21,2},{22,2},{23,2},{24,2},{25,2},{26,2},  // PQRSTUVW
@@ -120,10 +120,9 @@ static NimBLECharacteristic* inputConsumer = nullptr;
 static std::atomic<bool> bleConnected{false};
 static std::atomic<bool> restartAdvertising{false};
 static std::atomic<uint16_t> peerHandle{BLE_HS_CONN_HANDLE_NONE};
-static uint32_t pairingUntil = 0, hostDeadline = 0;
-static uint8_t hostSlot = 0;
-static String preferredHost;
-static String currentHost;
+static uint32_t pairingUntil = 0;
+static String connectedHost;    // 当前已加密连接的主机地址
+static String tryingHost;       // 正在尝试连接的主机地址（白名单过滤目标）
 static std::atomic<uint8_t> reportSubscriptions{0};
 static std::atomic<int> lastDisconnectReason{0};
 static bool advertisingStarted = false;
@@ -204,7 +203,7 @@ static void configureAdvertisementData(const String& name) {
 }
 
 static String configuredBleName() {
-  return String(remoteConfig["settings"]["bleName"] | "ESP32-C3 IR Remote");
+  return String(remoteConfig["settings"]["bleName"] | "Remote Master");
 }
 
 void bleHidBegin() {
@@ -234,7 +233,7 @@ void bleHidBegin() {
     return;
   }
   configureAdvertisementData(name);
-  bleReconnectHosts();
+  restartAdvertising.store(true);
 
   Serial.printf("[OK] BLE HID 已启动：%s\n", name.c_str());
 }
@@ -244,7 +243,7 @@ void bleApplyName() {
   String name = configuredBleName();
   NimBLEDevice::setDeviceName(name.c_str());
   configureAdvertisementData(name);
-  bleReconnectHosts();
+  restartAdvertising.store(true);
   Serial.printf("[BLE] device name applied: %s\n", name.c_str());
 }
 
@@ -252,13 +251,14 @@ bool bleHidConnected() {
   return bleConnected.load();
 }
 
-void bleReconnectHosts() {
+// 尝试重连指定主机：断开当前连接，将该地址设为白名单目标，触发广播
+bool bleReconnectToHost(const String& address, uint8_t addressType) {
   if (hidServer && peerHandle.load() != BLE_HS_CONN_HANDLE_NONE)
     hidServer->disconnect(peerHandle.load());
-  hostSlot = 0;
-  hostDeadline = 0;
-  preferredHost = "";
+  tryingHost = address;
   restartAdvertising.store(true);
+  Serial.printf("[BLE] reconnect requested to %s type=%u\n", address.c_str(), addressType);
+  return true;
 }
 
 void blePairingOpen() {
@@ -267,8 +267,9 @@ void blePairingOpen() {
   bleConnected.store(false);
   reportSubscriptions.store(0);
   newHostPairing.store(NimBLEDevice::getNumBonds() > 0);
+  tryingHost = "";
   pairingUntil = millis() + 120000;
-  bleReconnectHosts();
+  restartAdvertising.store(true);
 }
 
 bool bleHostForget(const char* address, uint8_t addressType) {
@@ -277,9 +278,7 @@ bool bleHostForget(const char* address, uint8_t addressType) {
   bool active = handle != BLE_HS_CONN_HANDLE_NONE &&
                 hidServer->getPeerInfoByHandle(handle).getIdAddress() == identity;
   if (active) stopHid("forget-host");
-  // Missing bonds are already forgotten; errors must not become success responses.
   bool existed = NimBLEDevice::isBonded(identity);
-  // NimBLE rejects IRK removal while advertising is active (BLE_HS_EBUSY).
   auto advertising = NimBLEDevice::getAdvertising();
   bool stopped = !advertising->isAdvertising() || advertising->stop();
   int rc = existed && stopped ? ble_gap_unpair(identity.getBase())
@@ -297,6 +296,20 @@ bool bleHostForget(const char* address, uint8_t addressType) {
     reportSubscriptions.store(0);
     hidServer->disconnect(handle);
   }
+  // If we forgot the lastHost, clear it
+  String lastHostId = remoteConfig["lastHostId"] | "";
+  if (!lastHostId.isEmpty()) {
+    for (JsonObject host : remoteConfig["hosts"].as<JsonArray>()) {
+      if (host["id"].as<String>() == lastHostId &&
+          host["address"].as<String>() == address &&
+          (host["addressType"] | 0) == addressType) {
+        remoteConfig.remove("lastHostId");
+        saveRemoteConfig();
+        break;
+      }
+    }
+  }
+  tryingHost = "";
   pairingUntil = 0;
   newHostPairing.store(false);
   restartAdvertising.store(true);
@@ -305,10 +318,27 @@ bool bleHostForget(const char* address, uint8_t addressType) {
   return true;
 }
 
+// 恢复初始状态：断开当前连接并清除所有 BLE 绑定，使设备回到可配对的出厂状态。
+void bleClearAllBonds() {
+  stopHid("factory-reset");
+  uint16_t handle = peerHandle.load();
+  if (handle != BLE_HS_CONN_HANDLE_NONE && hidServer) {
+    hidServer->disconnect(handle);
+  }
+  bleConnected.store(false);
+  reportSubscriptions.store(0);
+  tryingHost = "";
+  pairingUntil = 0;
+  newHostPairing.store(false);
+  NimBLEDevice::deleteAllBonds();
+  restartAdvertising.store(true);
+  Serial.println("[BLE] all bonds cleared");
+}
+
 void bleHostStatus(JsonObject obj) {
   obj["connected"] = bleHidConnected();
-  obj["host"] = currentHost;
-  obj["preferredHost"] = preferredHost;
+  obj["host"] = connectedHost;
+  obj["tryingHost"] = tryingHost;
   bool unpaired = NimBLEDevice::getNumBonds() == 0;
   obj["pairing"] = unpaired || (pairingUntil && static_cast<int32_t>(pairingUntil - millis()) > 0);
   obj["pairingAlwaysOpen"] = unpaired;
@@ -318,6 +348,21 @@ void bleHostStatus(JsonObject obj) {
   obj["reportSubscriptions"] = reportSubscriptions.load();
   obj["advertising"] = advertisingStarted && NimBLEDevice::getAdvertising()->isAdvertising();
   obj["lastDisconnectReason"] = lastDisconnectReason.load();
+  obj["lastHostId"] = remoteConfig["lastHostId"] | "";
+}
+
+// 从配置中查找 lastHostId 对应的地址和类型，未找到返回 false
+static bool resolveLastHost(String& address, uint8_t& addressType) {
+  String lastHostId = remoteConfig["lastHostId"] | "";
+  if (lastHostId.isEmpty()) return false;
+  for (JsonObjectConst host : remoteConfig["hosts"].as<JsonArrayConst>()) {
+    if (host["id"].as<String>() == lastHostId) {
+      address = host["address"].as<String>();
+      addressType = host["addressType"] | 0;
+      return true;
+    }
+  }
+  return false;
 }
 
 void tickBleHosts() {
@@ -325,85 +370,99 @@ void tickBleHosts() {
   if (pairingUntil && static_cast<int32_t>(millis() - pairingUntil) >= 0) {
     pairingUntil = 0;
     newHostPairing.store(false);
-    if (peerHandle.load() == BLE_HS_CONN_HANDLE_NONE) bleReconnectHosts();
+    if (peerHandle.load() == BLE_HS_CONN_HANDLE_NONE)
+      restartAdvertising.store(true);
   }
   uint16_t handle = peerHandle.load();
   if (handle == forgettingHandle && handle != BLE_HS_CONN_HANDLE_NONE) return;
   forgettingHandle = BLE_HS_CONN_HANDLE_NONE;
-  if (bleHidConnected() && handle != BLE_HS_CONN_HANDLE_NONE && currentHost.isEmpty()) {
+
+  // On successful connection: record host and persist as lastHost
+  if (bleHidConnected() && handle != BLE_HS_CONN_HANDLE_NONE && connectedHost.isEmpty()) {
     auto info = hidServer->getPeerInfoByHandle(handle);
     if (info.isBonded()) {
       auto address = info.getIdAddress();
-      currentHost = address.toString().c_str();
+      connectedHost = address.toString().c_str();
+      tryingHost = "";
       pairingUntil = 0;
       newHostPairing.store(false);
-      hostDeadline = 0;
+
+      // Find or create host entry
       JsonArray hosts = remoteConfig["hosts"].as<JsonArray>();
       JsonObject found;
       for (JsonObject host : hosts)
-        if (host["address"].as<String>() == currentHost &&
+        if (host["address"].as<String>() == connectedHost &&
             host["addressType"].as<uint8_t>() == address.getType()) found = host;
       if (found.isNull() && hosts.size() < 8) {
         found = hosts.add<JsonObject>();
         uint32_t next = remoteConfig["nextId"] | 1U;
         remoteConfig["nextId"] = next + 1;
         found["id"] = String(next);
-        found["name"] = String("Host ") + currentHost;
-        found["address"] = currentHost;
+        found["name"] = String("Host ") + connectedHost;
+        found["address"] = connectedHost;
         found["addressType"] = address.getType();
-        found["priority"] = hosts.size() - 1;
-        found["enabled"] = true;
         if (!saveRemoteConfig()) Serial.println("[STORE] host save failed");
+      }
+      // Persist as lastHost
+      if (!found.isNull()) {
+        remoteConfig["lastHostId"] = found["id"].as<String>();
+        if (!saveRemoteConfig()) Serial.println("[STORE] lastHost save failed");
       }
     }
   }
+
+  // Disconnected: clear state, tick 会触发广播重启
   if (handle != BLE_HS_CONN_HANDLE_NONE) return;
-  if (!currentHost.isEmpty()) {
-    currentHost = "";
+  if (!connectedHost.isEmpty()) {
+    connectedHost = "";
+    tryingHost = "";
     stopHid("disconnected");
-    bleReconnectHosts();
   }
-  uint32_t now = millis();
-  if (!restartAdvertising.exchange(false) &&
-      (hostDeadline == 0 || static_cast<int32_t>(now - hostDeadline) < 0)) return;
+
+  if (!restartAdvertising.exchange(false)) return;
+
+  // 配置广播：有目标则白名单过滤，否则开放可发现
   auto advertising = NimBLEDevice::getAdvertising();
   advertising->stop();
   while (NimBLEDevice::getWhiteListCount())
     NimBLEDevice::whiteListRemove(NimBLEDevice::getWhiteListAddress(0));
-  preferredHost = "";
-  JsonObject ordered[8];
-  uint8_t count = 0;
-  for (JsonObject host : remoteConfig["hosts"].as<JsonArray>()) {
-    if (!(host["enabled"] | true)) continue;
-    NimBLEAddress address(host["address"].as<std::string>(), host["addressType"] | 0);
-    bool bonded = false;
-    for (int i = 0; i < NimBLEDevice::getNumBonds(); ++i)
-      if (NimBLEDevice::getBondedAddress(i) == address) bonded = true;
-    if (bonded && count < 8) ordered[count++] = host;
-  }
-  for (uint8_t i = 0; i < count; ++i)
-    for (uint8_t j = i + 1; j < count; ++j)
-      if ((ordered[j]["priority"] | 99) < (ordered[i]["priority"] | 99)) {
-        JsonObject swap = ordered[i]; ordered[i] = ordered[j]; ordered[j] = swap;
-      }
+  tryingHost = "";
+
   bool unpaired = NimBLEDevice::getNumBonds() == 0;
-  if (!unpaired && !pairingUntil && count) {
-    JsonObject host = ordered[hostSlot++ % count];
-    preferredHost = host["address"].as<String>();
-    if (!NimBLEDevice::whiteListAdd(NimBLEAddress(
-        host["address"].as<std::string>(), host["addressType"] | 0)))
-      Serial.println("[BLE] whitelist update failed");
+  String targetAddress;
+  uint8_t targetType = 0;
+
+  // 优先使用用户指定的目标（bleReconnectToHost 设置了 tryingHost），
+  // 否则回退到 lastHost
+  // 注意：bleReconnectToHost 的 tryingHost 在上面被清空了，需要从状态判断
+  // 实际上 bleReconnectToHost 设了 tryingHost 然后触发 restartAdvertising，
+  // 但 tryingHost 在 disconnect 时被清空。我们改用 lastHostId 来判断目标。
+
+  if (!unpaired && !pairingUntil) {
+    resolveLastHost(targetAddress, targetType);
+  }
+
+  // 检查目标是否仍有 bond
+  bool targetBonded = false;
+  if (!targetAddress.isEmpty()) {
+    NimBLEAddress addr(std::string(targetAddress.c_str()), targetType);
+    for (int i = 0; i < NimBLEDevice::getNumBonds(); ++i)
+      if (NimBLEDevice::getBondedAddress(i) == addr) targetBonded = true;
+  }
+
+  if (!unpaired && !pairingUntil && targetBonded) {
+    tryingHost = targetAddress;
+    NimBLEAddress addr(std::string(targetAddress.c_str()), targetType);
+    NimBLEDevice::whiteListAdd(addr);
     advertising->setScanFilter(false, true);
-    hostDeadline = now + 10000;
   } else {
-    // An empty device starts discoverable; a configured device requires pairing mode.
+    // 无配对主机或配对窗口开放：可被发现
     advertising->setScanFilter(false, !unpaired && !pairingUntil);
-    hostDeadline = 0;
   }
   advertisingStarted = advertising->start();
-  Serial.printf("[BLE] advertising started=%u pairing=%u whitelist=%u preferred=%s\n",
+  Serial.printf("[BLE] advertising started=%u pairing=%u whitelist=%u trying=%s\n",
                 advertisingStarted, pairingUntil != 0,
-                static_cast<unsigned>(NimBLEDevice::getWhiteListCount()), preferredHost.c_str());
+                static_cast<unsigned>(NimBLEDevice::getWhiteListCount()), tryingHost.c_str());
 }
 
 // ==================== HID 动作执行 ====================

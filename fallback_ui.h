@@ -49,7 +49,7 @@ static const char kFallbackHtml[] PROGMEM = R"HTML(<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>IR Keyboard</h1>
-  <div class="sub">ESP32-C3 · 红外 → BLE HID 遥控器 — 固件运行正常，前端尚未部署</div>
+  <div class="sub">ESP32-C3 BLE/IR 多功能遥控平台 — 固件运行正常，前端尚未部署</div>
 
   <div class="card">
     <h2>设备状态</h2>
@@ -59,14 +59,11 @@ static const char kFallbackHtml[] PROGMEM = R"HTML(<!DOCTYPE html>
 
   <div class="card">
     <h2>部署前端</h2>
-    <p class="hint">整个前端目录会被原样映射到 URL 根路径：<code>dist/assets/x.js</code> → <code>/frontend/assets/x.js</code> → 访问 <code>/assets/x.js</code>。Vite / Rollup 默认产物可直接整包上传。</p>
-    <p class="hint">命令行方式：在项目目录运行 <code>node deploy.mjs http://192.168.4.1 --dir &lt;dist目录&gt; --remote /frontend</code>。</p>
+    <p class="hint">在项目目录构建前端包：<code>cd web &amp;&amp; npm run build</code>，产物输出到 <code>data/frontend</code>。选择该目录整包上传，会先清空设备上的 <code>/frontend</code> 再写入，避免旧构建的哈希文件残留。</p>
+    <p class="hint">命令行方式：<code>node deploy.mjs http://192.168.4.1 --dir data/frontend --remote /frontend</code>。</p>
     <div class="upload">
-      <label class="file">方式一：选择整个目录（会先清空设备上的 /frontend）<br>
+      <label class="file">选择构建产物目录（<code>data/frontend</code>）<br>
         <input type="file" id="dir" webkitdirectory directory multiple>
-      </label>
-      <label class="file">方式二：单独替换若干文件
-        <input type="file" id="files" multiple>
       </label>
       <div class="btns">
         <button id="btn-up" disabled>上传</button>
@@ -117,8 +114,7 @@ async function loadStatus(){
 }
 function collect(){
   const picked=[];
-  const dir=$('dir').files, single=$('files').files;
-  for(const f of single) picked.push({file:f,path:f.name});
+  const dir=$('dir').files;
   for(const f of dir){
     // dist/index.html -> index.html：丢掉用户选择的顶层目录名
     const rel=(f.webkitRelativePath||f.name).split('/').slice(1).join('/');
@@ -127,10 +123,9 @@ function collect(){
   return picked;
 }
 function refreshButton(){
-  $('btn-up').disabled=!(($('dir').files.length)+($('files').files.length));
+  $('btn-up').disabled=!($('dir').files.length);
 }
 $('dir').addEventListener('change',refreshButton);
-$('files').addEventListener('change',refreshButton);
 $('btn-wipe').addEventListener('click',async()=>{
   if(!confirm('确定清空设备上的 /frontend 目录？配置、学习记录与蓝牙密钥不受影响。'))return;
   try{

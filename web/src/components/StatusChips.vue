@@ -10,13 +10,17 @@ const ble = computed(() => device.status.ble || {});
 
 const bleChip = computed(() => {
   const info = ble.value;
-  if (info.connected) return {text: `蓝牙已加密连接 · ${catalog.hostName(info.host) || '主机'}`, tone: 'ok'};
+  if (info.connected) {
+    const hostName = catalog.hostName(info.host) || info.host || '主机';
+    return {text: `蓝牙已加密连接 · ${hostName}`, tone: 'ok'};
+  }
+  if (info.tryingHost) {
+    const hostName = catalog.hostName(info.tryingHost) || info.tryingHost;
+    return {text: `蓝牙正在尝试连接 · ${hostName}`, tone: ''};
+  }
   if (info.pairingAlwaysOpen) return {text: '蓝牙配对开放（尚无主机）', tone: ''};
   if (info.pairing) return {text: '蓝牙新主机配对窗口开放中', tone: ''};
-  if (info.advertising) {
-    const preferred = info.preferredHost ? catalog.hostName(info.preferredHost) : '无';
-    return {text: `蓝牙广播中 · 优先 ${preferred}`, tone: ''};
-  }
+  if (info.advertising) return {text: '蓝牙广播中（等待上次连接的主机）', tone: ''};
   return {text: '蓝牙未广播', tone: ''};
 });
 

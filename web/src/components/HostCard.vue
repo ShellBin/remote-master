@@ -7,27 +7,20 @@ const props = defineProps({
   host: {type: Object, required: true},
   disabled: {type: Boolean, default: false},
 });
-defineEmits(['save', 'remove']);
+defineEmits(['save', 'remove', 'connect']);
 
 const draft = reactive({
   name: props.host.name,
-  priority: props.host.priority,
-  enabled: Boolean(props.host.enabled),
 });
 </script>
 
 <template>
-  <form class="item host-form" @submit.prevent="$emit('save', {
-    name: draft.name,
-    priority: Number(draft.priority),
-    enabled: draft.enabled,
-  })">
+  <form class="item host-form" @submit.prevent="$emit('save', {name: draft.name})">
     <strong>{{ host.address }}</strong>
     <label>主机名称<input v-model="draft.name" maxlength="63" required></label>
-    <label>优先级（越小越优先）<input v-model="draft.priority" type="number" min="0" max="99" required></label>
-    <label class="check"><input v-model="draft.enabled" type="checkbox">允许自动重连</label>
     <div class="actions">
-      <button :disabled="disabled">保存主机</button>
+      <button :disabled="disabled">保存名称</button>
+      <button type="button" class="secondary" :disabled="disabled" @click="$emit('connect')">尝试连接</button>
       <button type="button" class="danger" :disabled="disabled" @click="$emit('remove')">忘记主机</button>
     </div>
   </form>

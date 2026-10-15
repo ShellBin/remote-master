@@ -19,8 +19,8 @@
 #include "action_router.h"
 
 static const uint8_t kIrDataPin = 5, kSensorGroundPin = 6, kSensorVccPin = 7, kLedPin = 8;
-static const char kApSsid[] = "IR-C3-Remote";
-static const char kApPassword[] = "irremote123";
+static const char kApSsid[] = "Remote Master";
+static const char kApPassword[] = "";
 WebServer server(80);
 WebSocketsServer sockets(81);
 
@@ -104,7 +104,18 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
       blePairingOpen(); stateDirty = true;
     } else if (op == "hosts.reconnect") {
       stopHid("switch-host");
-      bleReconnectHosts(); stateDirty = true;
+      String hostId = args["id"] | "";
+      if (hostId.isEmpty()) error = "Host id required";
+      else {
+        bool found = false;
+        for (JsonObjectConst host : remoteConfig["hosts"].as<JsonArrayConst>())
+          if (host["id"].as<String>() == hostId) {
+            bleReconnectToHost(host["address"].as<String>(), host["addressType"] | 0);
+            found = true;
+          }
+        if (!found) error = "Host not found";
+        stateDirty = true;
+      }
     } else if (op == "mappings.test" || op == "macros.test") {
       if (learningMode) error = "Stop learning before testing";
       else {
@@ -133,6 +144,13 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
         else if (!dispatchAction(descriptor.as<JsonObjectConst>()))
           error = "BLE must be encrypted, report subscribed, and HID idle";
         else stateDirty = true;
+      }
+    } else if (op == "system.reset") {
+      if (!filesystemMounted) error = "Filesystem unavailable";
+      else {
+        bleClearAllBonds();
+        if (!remoteStoreFactoryReset()) error = "Factory reset failed";
+        else { stateDirty = true; storageReady = true; }
       }
     } else if (!storageReady) {
       error = "Storage unavailable; configuration is read-only";
@@ -202,7 +220,7 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
           error = saveRemoteConfig() ? "BLE bond removal failed; host retained"
                                      : "BLE bond removal failed; configuration rollback failed";
         }
-        if (error.isEmpty() && op.startsWith("hosts.")) bleReconnectHosts();
+        // hosts.reconnect 已在上面处理；hosts.delete 触发 bleHostForget 内部已重置广播
         if (error.isEmpty() && op == "settings.save") {
           // 热点重启或蓝牙重广播都会扰动连接：先记下来，回包之后再应用。
           if (previous["settings"]["apSsid"].as<String>() !=
@@ -380,10 +398,24 @@ void setup() {
   pinMode(kIrDataPin, INPUT);
   pinMode(kLedPin, OUTPUT); digitalWrite(kLedPin, HIGH);
   IrReceiver.begin(kIrDataPin, DISABLE_LED_FEEDBACK);
+  // 固件自行完成 FS 初始化：未挂载或配置存在致命兼容性问题时直接格式化，
+  // 不做版本向下兼容。格式化后重建默认配置，deploy.mjs 不再负责初始化。
   filesystemMounted = LittleFS.begin(false);
+  if (!filesystemMounted) {
+    Serial.println("[FS] not mounted; formatting");
+    filesystemMounted = LittleFS.format() && LittleFS.begin(false);
+  }
+  if (filesystemMounted) LittleFS.mkdir("/frontend");
   storageReady = filesystemMounted;
   if (storageReady) storageReady = remoteStoreBegin();
-  if (!storageReady) Serial.println("[STORE] mount/load failed; no automatic formatting");
+  if (!storageReady) {
+    Serial.println("[STORE] config load failed; formatting filesystem and rebuilding");
+    LittleFS.format();
+    filesystemMounted = LittleFS.begin(false);
+    if (filesystemMounted) LittleFS.mkdir("/frontend");
+    storageReady = filesystemMounted && remoteStoreBegin();
+    if (!storageReady) Serial.println("[STORE] rebuild failed; storage unavailable");
+  }
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
   applyAccessPoint();
@@ -400,7 +432,7 @@ void setup() {
     doc["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
     // 便于在未部署前端时展示实际生效的热点与蓝牙名称。
     doc["apSsid"] = remoteConfig["settings"]["apSsid"] | kApSsid;
-    doc["bleName"] = remoteConfig["settings"]["bleName"] | "ESP32-C3 IR Remote";
+    doc["bleName"] = remoteConfig["settings"]["bleName"] | "Remote Master";
     bleHostStatus(doc["ble"].to<JsonObject>());
     String message; serializeJson(doc, message);
     server.send(200, "application/json", message);
@@ -427,11 +459,9 @@ void loop() {
   sockets.loop();
   static bool wasConnected = false, wasRunning = false;
   static size_t hosts = 0;
-  static String preferred;
   static String previousBleStatus;
   JsonDocument status;
   bleHostStatus(status.to<JsonObject>());
-  String target = status["preferredHost"] | "";
   String bleStatus;
   serializeJson(status, bleStatus);
   if (previousBleStatus != bleStatus) {
@@ -439,9 +469,9 @@ void loop() {
     stateDirty = true;
   }
   if (wasConnected != bleHidConnected() || wasRunning != hidRunning ||
-      hosts != remoteConfig["hosts"].size() || preferred != target) stateDirty = true;
+      hosts != remoteConfig["hosts"].size()) stateDirty = true;
   wasConnected = bleHidConnected(); wasRunning = hidRunning;
-  hosts = remoteConfig["hosts"].size(); preferred = target;
+  hosts = remoteConfig["hosts"].size();
   if (stateDirty) { stateDirty = false; pushState(); }
   delay(1);
 }

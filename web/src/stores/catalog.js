@@ -24,7 +24,7 @@ export const useCatalogStore = defineStore('catalog', () => {
   const macros = computed(() => device.config.macros || []);
   const mappings = computed(() => device.config.mappings || []);
   const settings = computed(() => device.config.settings || {});
-  const hosts = computed(() => [...(device.config.hosts || [])].sort((a, b) => a.priority - b.priority));
+  const hosts = computed(() => [...(device.config.hosts || [])]);
 
   // ---------- 查询 ----------
   const remoteById = id => remotes.value.find(remote => remote.id === id);
@@ -88,8 +88,12 @@ export const useCatalogStore = defineStore('catalog', () => {
   const stopLearning = () => device.command('learn.stop');
 
   const pairHost = () => device.command('hosts.pair');
-  const reconnectHosts = () => device.command('hosts.reconnect');
+  const reconnectToHost = hostId => device.command('hosts.reconnect', {id: hostId});
   const stopHid = () => device.command('hid.stop');
+
+  // 恢复初始状态：清空所有遥控器、按键、映射、宏、主机与红外采样，重建默认配置。
+  // 前端资源保留，无需重新部署。
+  const systemReset = () => device.command('system.reset');
 
   return {
     remotes, keys, macros, mappings, hosts, settings,
@@ -98,6 +102,6 @@ export const useCatalogStore = defineStore('catalog', () => {
     describeMapping, stepSummary,
     save, remove, test, saveSettings,
     startLearning, stopLearning,
-    pairHost, reconnectHosts, stopHid,
+    pairHost, reconnectToHost, stopHid, systemReset,
   };
 });

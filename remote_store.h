@@ -4,6 +4,9 @@
 // Stable IDs keep transports, learned inputs and output actions independent.
 extern JsonDocument remoteConfig;
 bool remoteStoreBegin();
+// 致命兼容性问题时由固件调用：清空配置与红外采样，重建默认配置。
+// 不格式化整个 FS，前端资源保留，页面无需重新部署。
+bool remoteStoreFactoryReset();
 bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error);
 bool resolveRemoteInput(const char* transport, const char* device,
                         const char* proto, const char* code, Binding& action);

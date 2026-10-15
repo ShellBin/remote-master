@@ -67,7 +67,6 @@ function pairHost() {
   run(() => catalog.pairHost(), '已开放配对窗口');
 }
 
-const reconnectHosts = () => run(() => catalog.reconnectHosts(), '已重启优先级广播');
 const saveHost = (host, payload) => run(() => catalog.save('hosts', {id: host.id, ...payload}), '主机已保存');
 
 async function forgetHost(host) {
@@ -75,7 +74,16 @@ async function forgetHost(host) {
   await run(() => catalog.remove('hosts', host.id), '已忘记主机');
 }
 
+const connectHost = host => run(() => catalog.reconnectToHost(host.id), `正在尝试连接 ${host.address}`);
+
 const exportData = scope => run(() => device.exportData(scope), '数据已导出');
+
+async function resetSystem() {
+  if (!confirm('恢复初始状态将格式化整个文件系统（含前端页面），并清除所有已配对蓝牙设备，不可撤销。是否继续？')) return;
+  await run(async () => {
+    await catalog.systemReset();
+  }, '已恢复初始状态');
+}
 </script>
 
 <template>
@@ -86,7 +94,7 @@ const exportData = scope => run(() => device.exportData(scope), '数据已导出
         <h3>无线热点</h3>
         <div class="fields">
           <label>热点名称<input v-model="form.apSsid" maxlength="31" required></label>
-          <label>热点密码（8-63 位）<input v-model="form.apPassword" maxlength="63" required autocomplete="off"></label>
+          <label>热点密码（留空为开放热点，或 8-63 位）<input v-model="form.apPassword" maxlength="63" autocomplete="off"></label>
         </div>
 
         <h3>蓝牙</h3>
@@ -130,11 +138,10 @@ const exportData = scope => run(() => device.exportData(scope), '数据已导出
       <p class="hint">
         没有已配对主机时持续开放配对。同时只连接一个主机；添加新主机会断开当前连接并开放配对 2 分钟，
         旧主机在窗口内不能抢先重连。新主机配对完成后窗口自动关闭，原有主机记录保留。
-        已配对主机按优先级轮流获得 10 秒连接窗口。
+        上电后自动重连上次成功连接的主机，也可从下方列表手动指定尝试连接。
       </p>
       <div class="actions">
         <button :disabled="busy" @click="pairHost">添加新主机（断开当前连接）</button>
-        <button class="secondary" :disabled="busy" @click="reconnectHosts">重启优先级广播</button>
       </div>
 
       <HostCard
@@ -144,9 +151,9 @@ const exportData = scope => run(() => device.exportData(scope), '数据已导出
         :disabled="busy"
         @save="payload => saveHost(host, payload)"
         @remove="forgetHost(host)"
+        @connect="connectHost(host)"
       />
       <p v-if="!catalog.hosts.length" class="hint">尚无配对主机，请开放配对并在电脑上连接。</p>
-
       <p class="hint">
         修改固件后仍无法连接时，先在电脑中移除旧设备，再在此处忘记主机并重新配对。
         忘记主机会删除设备端的配对密钥。
@@ -163,6 +170,18 @@ const exportData = scope => run(() => device.exportData(scope), '数据已导出
         <button class="secondary" :disabled="busy" @click="exportData('remotes')">导出遥控器与原始红外数据</button>
         <button class="secondary" :disabled="busy" @click="exportData('macros')">导出动作序列</button>
         <button class="secondary" :disabled="busy" @click="exportData('all')">导出全部业务数据</button>
+      </div>
+    </article>
+
+    <article>
+      <h2>恢复初始状态</h2>
+      <p class="hint">
+        格式化整个文件系统：清空遥控器、按键、映射、宏、已配对主机、红外采样与前端页面，
+        重建默认配置与空的 /frontend 目录。执行后前端页面不可用，需重新上传前端产物。
+        此操作不可撤销，建议先导出备份。
+      </p>
+      <div class="actions">
+        <button class="danger" :disabled="busy" @click="resetSystem">恢复初始状态</button>
       </div>
     </article>
   </section>
