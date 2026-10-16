@@ -1,9 +1,10 @@
 <script setup>
 import {computed, reactive, ref, watch} from 'vue';
-import {onActivated, onDeactivated} from 'vue';
+import {onActivated, onDeactivated, onBeforeUnmount} from 'vue';
 import {useAction} from '@/composables/useAction';
 import {useCatalogStore} from '@/stores/catalog';
 import {useDeviceStore} from '@/stores/device';
+import {createKeyHighlighter} from '@/lib/key-highlighter';
 
 const catalog = useCatalogStore();
 const device = useDeviceStore();
@@ -32,52 +33,28 @@ const learningHere = computed(() => (
   Boolean(selectedRemoteId.value) && device.status.learningRemote === selectedRemoteId.value
 ));
 
-// 学习信号匹配时按键卡片高亮（渐入渐出）
-const HIGHLIGHT_MS = 1500;
-const highlightedKeyIds = ref(new Set());
-const highlightTimers = new Map(); // keyId -> timeout，每个按键独立计时，互不干扰
-
-// 强制重放 CSS 动画：先移除 class，等浏览器完成一次样式计算后再加回。
-// 否则 class 已存在时 animation 不会重新开始，导致"收到信号却没有反馈"。
-function flashKey(keyId) {
-  const without = new Set(highlightedKeyIds.value);
-  without.delete(keyId);
-  highlightedKeyIds.value = without;
-
-  const previous = highlightTimers.get(keyId);
-  if (previous) clearTimeout(previous);
-
-  requestAnimationFrame(() => {
-    const withKey = new Set(highlightedKeyIds.value);
-    withKey.add(keyId);
-    highlightedKeyIds.value = withKey;
-
-    highlightTimers.set(keyId, setTimeout(() => {
-      const after = new Set(highlightedKeyIds.value);
-      after.delete(keyId);
-      highlightedKeyIds.value = after;
-      highlightTimers.delete(keyId);
-    }, HIGHLIGHT_MS));
-  });
-}
-
-function clearHighlights() {
-  highlightTimers.forEach(timer => clearTimeout(timer));
-  highlightTimers.clear();
-  if (highlightedKeyIds.value.size) highlightedKeyIds.value = new Set();
-}
+// 动画由每张卡片独立持有，不依赖 class 切换或共享定时器。
+const keyHighlighter = createKeyHighlighter();
+let viewActive = true;
+watch(selectedRemoteId, () => keyHighlighter.clear(), {flush: 'sync'});
+onBeforeUnmount(() => {
+  viewActive = false;
+  keyHighlighter.dispose();
+});
 
 // 切换 Tab 时停止学习并丢弃未保存红外码
 onDeactivated(() => {
+  viewActive = false;
+  keyHighlighter.clear();
   if (learningHere.value) {
     catalog.stopLearning();
   }
   resetKeyForm();
-  clearHighlights();
 });
 
 // 重新激活时清理本地表单
 onActivated(() => {
+  viewActive = true;
   resetKeyForm();
 });
 
@@ -246,7 +223,7 @@ function resetKeyForm() {
 // 收到信号：若选中遥控器有同码按键则高亮对应卡片（渐入渐出）；
 // 学习模式下还会填充表单并进入"更新"模式。
 watch(() => device.lastInput, input => {
-  if (!input || !selectedRemoteId.value) return;
+  if (!viewActive || !input || !selectedRemoteId.value) return;
 
   // 仅在当前遥控器范围内查找匹配按键（避免多遥控共用码时混乱）
   const existing = catalog.keys.find(key => (
@@ -256,7 +233,7 @@ watch(() => device.lastInput, input => {
   ));
 
   // 高亮匹配到的按键卡片（学习与非学习模式均生效）
-  if (existing?.id) flashKey(existing.id);
+  if (existing?.id) keyHighlighter.flash(existing.id);
 
   // 仅学习模式：填充表单并进入"更新"模式
   if (!device.status.learningRemote || device.status.learningRemote !== selectedRemoteId.value) return;
@@ -277,7 +254,7 @@ watch(() => device.lastInput, input => {
     `收到 ${input.proto} 按键，${input.pulseCount} 段原始脉冲，请命名后保存`
       + (others.length ? `；注意该红外码还存在于其他 ${others.length} 个按键` : ''),
   );
-});
+}, {flush: 'sync'});
 
 async function submitRemote() {
   await run(async () => {
@@ -434,8 +411,8 @@ async function commitRename(key) {
           <div
             v-for="key in keysHere"
             :key="key.id"
+            :ref="element => keyHighlighter.setElement(key.id, element)"
             class="key-card"
-            :class="{ 'key-highlight': highlightedKeyIds.has(key.id) }"
           >
             <div class="key-card-header">
               <span
@@ -560,12 +537,6 @@ async function commitRename(key) {
 /* 按键紧凑网格 */
 .key-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:16px}
 .key-card{background:#141f31;border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;overflow-wrap:anywhere}
-.key-card.key-highlight{animation:key-pulse 1.5s ease-in-out}
-@keyframes key-pulse{
-  0%{box-shadow:none;border-color:var(--line)}
-  30%{box-shadow:0 0 0 2px var(--accent),0 0 14px 4px color-mix(in srgb,var(--accent) 45%,transparent);border-color:var(--accent)}
-  100%{box-shadow:none;border-color:var(--line)}
-}
 .key-card-header{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .key-name{font-weight:500;color:var(--text);cursor:pointer;border-bottom:1px dashed transparent;transition:border-color .15s}
 .key-name:hover{border-bottom-color:var(--accent)}

@@ -5,6 +5,7 @@
   "type": "module",
   "description": "ESP32-C3 Remote Master前端（Vue 3 + Vue Router + Pinia）",
   "scripts": {
+    "test": "node --test src/lib/*.test.js",
     "dev": "vite",
     "build": "vite build && node scripts/gzip.mjs",
     "build:only": "vite build",

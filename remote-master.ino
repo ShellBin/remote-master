@@ -284,8 +284,6 @@ void captureIrFrame() {
     for (uint16_t i = 0; i < rawCount; ++i) rawTicks[i] = IrReceiver.irparams.rawbuf[i + 1];
   // Resume reception before any networking or HID work.
   IrReceiver.resume();
-  uint32_t now = millis();
-  ledUntil = now + 300;
   bool repeat = data.flags & IRDATA_FLAGS_IS_REPEAT;
   bool overflow = data.flags & IRDATA_FLAGS_WAS_OVERFLOW;
   // Filter significant hex length, not the zero-padded storage representation.
@@ -313,6 +311,8 @@ void captureIrFrame() {
     }
     return;
   }
+  uint32_t now = millis();
+  ledUntil = now + 300;
   String proto = getProtocolString(data.protocol);
   char code[17];
   snprintf(code, sizeof(code), "%016llX", static_cast<unsigned long long>(data.decodedRawData));
