@@ -1,16 +1,22 @@
 #include "action_router.h"
 #include "remote_store.h"
 #include "ble_hid.h"
+#include "ir_tx.h"
 
 bool dispatchAction(JsonObjectConst descriptor) {
+  String error;
+  return dispatchAction(descriptor, error);
+}
+
+bool dispatchAction(JsonObjectConst descriptor, String& error) {
   const char* target = descriptor["target"] | "ble-hid";
-  if (strcmp(target, "ir-send") == 0) {
-    // 红外发射需要发射管硬件（第三期）；映射可保存、可展示，执行留待硬件就绪。
-    Serial.println(F("[IR] transmit requested but the IR LED is not available yet"));
-    return false;
-  }
+  if (strcmp(target, "ir-send") == 0) return irTxExecute(descriptor, error);
+  if (irTxBusy()) { error = "An IR action is already running"; return false; }
   Binding binding;
-  return remoteAction(descriptor, binding) && executeBinding(binding);
+  if (!remoteAction(descriptor, binding) || !executeBinding(binding)) {
+    error = "BLE must be encrypted, report subscribed, and HID idle"; return false;
+  }
+  return true;
 }
 
 void dispatchInput(const char* transport, const char* device,

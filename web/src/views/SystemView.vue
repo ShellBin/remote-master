@@ -11,13 +11,14 @@ const device = useDeviceStore();
 const {busy, run} = useAction();
 
 const formEl = ref(null);
-const form = reactive({apSsid: '', apPassword: '', bleName: '', minPulses: 8});
+const form = reactive({apSsid: '', apPassword: '', bleName: '', minPulses: 8, irTxMode: 'off'});
 
 function syncFromSettings(settings) {
   form.apSsid = settings.apSsid || '';
   form.apPassword = settings.apPassword || '';
   form.bleName = settings.bleName || '';
   form.minPulses = settings.minPulses ?? 8;
+  form.irTxMode = settings.irTxMode || 'off';
 }
 
 // 状态推送会频繁到来，但用户正在输入时不回填，否则光标会被抢走。
@@ -136,6 +137,7 @@ async function submitIrSettings() {
   await run(async () => {
     const payload = {
       minPulses: Number(form.minPulses),
+      irTxMode: form.irTxMode,
     };
     await catalog.saveSettings(payload);
   }, '红外设置已保存');
@@ -166,11 +168,11 @@ async function resetSystem() {
 </script>
 
 <template>
-  <section>
+  <section ref="formEl">
     <!-- 无线网 -->
     <article>
       <h2>Wi-Fi</h2>
-      <form ref="formEl" @submit.prevent="submitWifiSettings">
+      <form @submit.prevent="submitWifiSettings">
         <h3>热点设置</h3>
         <div class="fields">
           <label>热点名称<input v-model="form.apSsid" maxlength="31" required></label>
@@ -231,6 +233,16 @@ async function resetSystem() {
     <article>
       <h2>红外</h2>
       <form @submit.prevent="submitIrSettings">
+        <h3>红外发射（GPIO4）</h3>
+        <label>发射管驱动模式
+          <select v-model="form.irTxMode">
+            <option value="off">关闭（高阻）</option>
+            <option value="push-pull">推挽（高电平有效）</option>
+            <option value="sink">灌电流（低电平有效）</option>
+          </select>
+        </label>
+        <p class="hint">默认关闭。推挽模式空闲为低电平；灌电流模式使用开漏输出，空闲释放引脚。请按接线选择模式，发射管必须限流，勿将 GPIO4 接到高于 3.3V 的电压。</p>
+        <p class="hint">保存后立即生效并中止当前红外动作。采样未记录载波时使用协议常用频率，未知协议默认 38 kHz。</p>
         <h3>红外接收信号过滤</h3>
         <label>忽略脉冲数少于 n 的红外信号（0 为不过滤）
           <input v-model.number="form.minPulses" type="number" min="0" max="750" required>

@@ -14,7 +14,7 @@ import {isIrOnlyMacro} from '@/lib/mapping';
  *   mappings → 按键 → 输出目标（ble-hid / ir-send）
  *   macros   → 动作序列（蓝牙 HID 序列 / 红外序列共用一套步骤模型）
  *   hosts    → 已配对的蓝牙主机
- *   settings → 热点、蓝牙名称、脉冲过滤阈值
+ *   settings → 热点、蓝牙名称、脉冲过滤阈值、红外发射模式
  */
 export const useCatalogStore = defineStore('catalog', () => {
   const device = useDeviceStore();
@@ -83,6 +83,7 @@ export const useCatalogStore = defineStore('catalog', () => {
   const remove = (collection, id) => device.command(`${collection}.delete`, {id});
   const test = (collection, id) => device.command(`${collection}.test`, {id});
   const saveSettings = payload => device.command('settings.save', payload);
+  const sendKey = id => device.command('keys.send', {id});
 
   const startLearning = remoteId => device.command('learn.start', {remoteId});
   const stopLearning = () => device.command('learn.stop');
@@ -100,7 +101,7 @@ export const useCatalogStore = defineStore('catalog', () => {
     remoteById, remoteName, keyById, hostName, mappingOf,
     keysOfRemote, mappedCountOfRemote, irCapableKeys, irKeysOfRemote, irOnlyMacros,
     describeMapping, stepSummary,
-    save, remove, test, saveSettings,
+    save, remove, test, saveSettings, sendKey,
     startLearning, stopLearning,
     pairHost, reconnectToHost, stopHid, systemReset,
   };

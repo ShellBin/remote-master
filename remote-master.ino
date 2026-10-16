@@ -18,6 +18,7 @@
 #include "remote_store.h"
 #include "file_api.h"
 #include "action_router.h"
+#include "ir_tx.h"
 
 static const uint8_t kIrDataPin = 5, kSensorGroundPin = 6, kSensorVccPin = 7, kLedPin = 8;
 static const char kApSsid[] = "Remote Master";
@@ -47,6 +48,12 @@ static String pendingCaptureId;
 static String pendingCaptureRemote;
 static bool filesystemMounted = false;
 
+void irTxPauseReceiver(bool paused) {
+  // Preserve external-key repeat history; reception is stopped through TX and settling.
+  if (paused) IrReceiver.stop();
+  else IrReceiver.start();
+}
+
 void socketSend(uint8_t client, JsonDocument& doc) {
   String message;
   serializeJson(doc, message);
@@ -63,6 +70,7 @@ void pushState(int client = -1) {
   status["heap"] = ESP.getFreeHeap();
   status["storageReady"] = storageReady;
   status["hidRunning"] = hidRunning;
+  status["irTxRunning"] = irTxBusy();
   status["fsTotal"] = filesystemMounted ? LittleFS.totalBytes() : 0;
   status["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
   bleHostStatus(status["ble"].to<JsonObject>());
@@ -107,6 +115,7 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
         if (remote["id"].as<String>() == id && strcmp(remote["transport"] | "", "ir") == 0) found = true;
       if (!found) error = "Select an IR remote first";
       else {
+        irTxStop();
         stopHid("learning");
         learningRemote = id;
         learningMode = true;
@@ -114,8 +123,11 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
         stateDirty = true;
       }
     } else if (op == "learn.stop" || op == "hid.stop") {
+      irTxStop();
       stopHid("user");
       learningMode = false; learningRemote = ""; stateDirty = true;
+    } else if (op == "keys.send") {
+      if (irTxSendKey(args["id"] | "", error)) stateDirty = true;
     } else if (op == "hosts.pair") {
       blePairingOpen(); stateDirty = true;
     } else if (op == "hosts.reconnect") {
@@ -135,7 +147,7 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
     } else if (op == "mappings.test" || op == "macros.test") {
       if (learningMode) error = "Stop learning before testing";
       else {
-        bool found = false, needsIrTx = false;
+        bool found = false;
         JsonDocument descriptor;
         if (op == "macros.test") {
           for (JsonObjectConst macro : remoteConfig["macros"].as<JsonArrayConst>()) {
@@ -144,26 +156,24 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
             descriptor["type"] = kTypeMacro;
             descriptor["macroId"] = macro["id"];
             for (JsonObjectConst step : macro["steps"].as<JsonArrayConst>())
-              if (strcmp(step["kind"] | "", "ir") == 0) needsIrTx = true;
+              if (strcmp(step["kind"] | "", "ir") == 0) descriptor["target"] = "ir-send";
           }
         } else {
           for (JsonObjectConst mapping : remoteConfig["mappings"].as<JsonArrayConst>()) {
             if (mapping["id"].as<String>() != args["id"].as<String>()) continue;
             found = true;
             descriptor.set(mapping);
-            if (strcmp(mapping["target"] | "ble-hid", "ir-send") == 0) needsIrTx = true;
           }
         }
         if (!found) error = "Item not found";
-        else if (needsIrTx)
-          error = "IR transmit needs the IR LED hardware (phase 3); mapping is saved but not executable yet";
-        else if (!dispatchAction(descriptor.as<JsonObjectConst>()))
-          error = "BLE must be encrypted, report subscribed, and HID idle";
-        else stateDirty = true;
+        else if (dispatchAction(descriptor.as<JsonObjectConst>(), error)) stateDirty = true;
       }
     } else if (op == "system.reset") {
       if (!filesystemMounted) error = "Filesystem unavailable";
       else {
+        irTxApplyMode("off");
+        stopHid("reset");
+        learningMode = false; learningRemote = "";
         bleClearAllBonds();
         if (!remoteStoreFactoryReset()) error = "Factory reset failed";
         else { stateDirty = true; storageReady = true; }
@@ -174,6 +184,12 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
       // A failed mutation/save restores the complete previous configuration.
       JsonDocument previous;
       previous.set(remoteConfig);
+      if (previous.overflowed()) {
+        response["ok"] = false;
+        response["error"] = "Insufficient memory to safely update configuration";
+        socketSend(client, response);
+        return;
+      }
       String captureFile;
       if (op == "keys.save") {
         // 导入流程：有 capturePath 无 id（新按键，采样文件已预上传）
@@ -230,7 +246,7 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
             key["capturePath"] = captureFile; key["captureStatus"] = "envelope-complete";
           }
       }
-      if (!changed || !saveRemoteConfig()) {
+      if (!changed || !saveRemoteConfig(&error)) {
         if (error.isEmpty()) error = "Configuration save failed";
         remoteConfig.set(previous);
         if (!captureFile.isEmpty()) LittleFS.remove(captureFile);
@@ -252,6 +268,8 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
         }
         // hosts.reconnect 已在上面处理；hosts.delete 触发 bleHostForget 内部已重置广播
         if (error.isEmpty() && op == "settings.save") {
+          if (args.containsKey("irTxMode"))
+            irTxApplyMode(remoteConfig["settings"]["irTxMode"] | "off");
           // 热点重启或蓝牙重广播都会扰动连接：先记下来，回包之后再应用。
           if (previous["settings"]["apSsid"].as<String>() !=
                   remoteConfig["settings"]["apSsid"].as<String>() ||
@@ -469,6 +487,7 @@ void exportData() {
 
 void setup() {
   Serial.begin(115200);
+  irTxApplyMode("off");
   pinMode(kSensorGroundPin, OUTPUT); digitalWrite(kSensorGroundPin, LOW);
   pinMode(kSensorVccPin, OUTPUT); digitalWrite(kSensorVccPin, HIGH);
   pinMode(kIrDataPin, INPUT);
@@ -492,6 +511,7 @@ void setup() {
     storageReady = filesystemMounted && remoteStoreBegin();
     if (!storageReady) Serial.println("[STORE] rebuild failed; storage unavailable");
   }
+  irTxApplyMode(remoteConfig["settings"]["irTxMode"] | "off");
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
   applyAccessPoint();
@@ -509,6 +529,8 @@ void setup() {
     // 便于在未部署前端时展示实际生效的热点与蓝牙名称。
     doc["apSsid"] = remoteConfig["settings"]["apSsid"] | kApSsid;
     doc["bleName"] = remoteConfig["settings"]["bleName"] | "Remote Master";
+    doc["irTxMode"] = remoteConfig["settings"]["irTxMode"] | "off";
+    doc["irTxRunning"] = irTxBusy();
     bleHostStatus(doc["ble"].to<JsonObject>());
     String message; serializeJson(doc, message);
     server.send(200, "application/json", message);
@@ -523,7 +545,8 @@ void setup() {
 }
 
 void loop() {
-  if (IrReceiver.decode()) captureIrFrame();
+  irTxTick();
+  if (!irTxBusy() && IrReceiver.decode()) captureIrFrame();
   tickBleHosts();
   tickHid();
   uint32_t now = millis();
@@ -533,7 +556,21 @@ void loop() {
   digitalWrite(kLedPin, static_cast<int32_t>(ledUntil - now) > 0 && ((now / 60) & 1) ? LOW : HIGH);
   server.handleClient();
   sockets.loop();
-  static bool wasConnected = false, wasRunning = false;
+  static bool wasConnected = false, wasRunning = false, wasIrTxRunning = false;
+  static String previousIrTxError;
+  if (wasIrTxRunning != irTxBusy()) stateDirty = true;
+  wasIrTxRunning = irTxBusy();
+  if (previousIrTxError != irTxLastError()) {
+    previousIrTxError = irTxLastError();
+    if (!previousIrTxError.isEmpty()) {
+      JsonDocument event;
+      event["event"] = "ir.error";
+      event["error"] = previousIrTxError;
+      String message;
+      serializeJson(event, message);
+      sockets.broadcastTXT(message);
+    }
+  }
   static size_t hosts = 0;
   static String previousBleStatus;
   JsonDocument status;

@@ -154,7 +154,7 @@ bool validMacro(JsonArrayConst steps) {
       if (ms < 0 || ms > 30000) return false;
       duration += ms;
     } else if (strcmp(kind, "ir") == 0) {
-      // 红外重放步骤：执行需要发射管硬件（第三期），此处只做结构校验。
+      // 此处校验结构，IR 执行器还会检查采样及实际帧时长。
       if (!step["keyId"].is<const char*>()) return false;
       JsonString keyId = step["keyId"].as<JsonString>();
       if (!keyId.size() || keyId.size() > 16) return false;

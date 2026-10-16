@@ -5,6 +5,7 @@ import {useAction} from '@/composables/useAction';
 import {useCatalogStore} from '@/stores/catalog';
 import {useDeviceStore} from '@/stores/device';
 import {createKeyHighlighter} from '@/lib/key-highlighter';
+import {irSendDisabledReason} from '@/lib/ir';
 
 const catalog = useCatalogStore();
 const device = useDeviceStore();
@@ -317,6 +318,11 @@ async function removeKey(key) {
   await run(() => catalog.remove('keys', key.id), '按键已删除');
 }
 
+const sendDisabledReason = key => irSendDisabledReason(
+  key, catalog.settings, device.status, device.ready,
+);
+const sendKey = key => run(() => catalog.sendKey(key.id), `已开始发射「${key.name}」`);
+
 // 开始重命名按键
 function startRename(key) {
   editingKeyId.value = key.id;
@@ -393,6 +399,10 @@ async function commitRename(key) {
           <button v-if="!learningHere" :disabled="busy" @click="startLearning">开始学习</button>
           <button v-if="learningHere" class="secondary" :disabled="busy" @click="stopLearning">停止学习</button>
         </div>
+        <p v-if="!['push-pull', 'sink'].includes(catalog.settings.irTxMode)" class="hint">
+          红外发射已关闭，请在设置页面选择 GPIO4 驱动模式后使用发射按钮。
+        </p>
+        <p v-if="device.status.irTxRunning" class="hint">正在发射红外信号，接收暂时暂停。</p>
 
         <form v-if="learningHere" @submit.prevent="submitKey">
           <div class="key-form-row">
@@ -439,6 +449,12 @@ async function commitRename(key) {
               <span class="key-code">{{ key.code }}</span>
             </div>
             <div class="key-card-actions">
+              <button
+                class="secondary"
+                :disabled="busy || !!sendDisabledReason(key)"
+                :title="sendDisabledReason(key) || '发射已保存的红外信号'"
+                @click="sendKey(key)"
+              >发射</button>
               <button class="danger" :disabled="busy" @click="removeKey(key)">删除</button>
             </div>
             <p v-if="!key.capturePath" class="key-hint">缺少原始脉冲，请重新学习</p>

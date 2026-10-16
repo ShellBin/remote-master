@@ -11,7 +11,7 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error);
 bool resolveRemoteInput(const char* transport, const char* device,
                         const char* proto, const char* code, Binding& action);
 bool remoteAction(JsonObjectConst mapping, Binding& action);
-bool saveRemoteConfig();
+bool saveRemoteConfig(String* error = nullptr);
 JsonObjectConst resolveInputMapping(const char* transport, const char* device,
                                    const char* proto, const char* code);
 void writeConfigSummary(JsonObject obj);

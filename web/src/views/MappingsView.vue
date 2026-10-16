@@ -266,8 +266,8 @@ async function removeMapping(mapping) {
             </template>
 
             <p class="hint">
-              红外发射是预留能力：当前硬件没有发射管，映射可以先保存，执行与测试会返回明确提示，
-              固件第三期实现重放。
+              请先在设置页面启用 GPIO4 红外发射。重放使用按键保存的原始脉冲，
+              发射期间暂停接收；红外序列只支持红外重放与等待步骤。
             </p>
           </template>
 
@@ -287,7 +287,6 @@ async function removeMapping(mapping) {
             :key="mapping.id"
             :title="catalog.keyById(mapping.keyId)?.name || '按键缺失'"
             :description="catalog.describeMapping(mapping)"
-            :badge="mapping.target === 'ir-send' ? '预留' : ''"
             testable
             :disabled="busy"
             @edit="editMapping(mapping)"

@@ -1,9 +1,20 @@
 #include "remote_store.h"
 #include "globals.h"
+#include "ir_tx.h"
 #include <LittleFS.h>
 
 JsonDocument remoteConfig;
 static const char* kConfigFile = "/remote-config.json";
+static constexpr size_t kMaxConfigBytes = 32768;
+
+// Keys and mappings share the configuration byte budget, not a global key quota.
+// Keep startup validation and mutation validation on the same limits.
+static size_t collectionLimit(const char* collection) {
+  if (strcmp(collection, "remotes") == 0) return 12;
+  if (strcmp(collection, "hosts") == 0) return 8;
+  if (strcmp(collection, "macros") == 0) return 50;
+  return 0;
+}
 
 static JsonObject findItem(const char* collection, const String& id) {
   for (JsonObject item : remoteConfig[collection].as<JsonArray>())
@@ -71,7 +82,8 @@ static const char* kDefaultApPassword = "";
 static const char* kDefaultBleName = "Remote Master";
 
 void ensureDefaultSettings() {
-  JsonObject settings = remoteConfig["settings"].to<JsonObject>();
+  JsonObject settings = remoteConfig["settings"].as<JsonObject>();
+  if (settings.isNull()) settings = remoteConfig["settings"].to<JsonObject>();
   String ssid = settings["apSsid"] | "";
   String password = settings["apPassword"] | "";
   String name = settings["bleName"] | "";
@@ -83,6 +95,8 @@ void ensureDefaultSettings() {
   if (!settings["minPulses"].is<int>() || settings["minPulses"].as<int>() < 0 ||
       settings["minPulses"].as<int>() > 750)
     settings["minPulses"] = 8;
+  if (!validIrTxMode(settings["irTxMode"] | ""))
+    settings["irTxMode"] = "off";
 }
 
 // 红外序列宏：只允许“红外重放 + 等待”步骤，且每个重放步骤引用的
@@ -108,10 +122,11 @@ static bool irMacroUsable(JsonArrayConst steps, String& error) {
 
 static bool settingsCommand(const String& verb, JsonObjectConst args, String& error) {
   if (verb != "save") { error = "Unknown operation"; return false; }
-  String apSsid, apPassword, bleName;
+  String apSsid, apPassword, bleName, irTxMode;
   int minPulses = -1;
   bool hasSsid = !args["apSsid"].isNull(), hasPassword = !args["apPassword"].isNull();
   bool hasName = !args["bleName"].isNull(), hasMinPulses = !args["minPulses"].isNull();
+  bool hasIrTxMode = args.containsKey("irTxMode");
   if (hasSsid) {
     apSsid = args["apSsid"].as<String>();
     if (apSsid.isEmpty() || apSsid.length() > 31) {
@@ -136,26 +151,43 @@ static bool settingsCommand(const String& verb, JsonObjectConst args, String& er
     minPulses = args["minPulses"].as<int>();
     if (minPulses < 0 || minPulses > 750) { error = "minPulses must be 0-750"; return false; }
   }
-  if (!hasSsid && !hasPassword && !hasName && !hasMinPulses) {
+  if (hasIrTxMode) {
+    if (!validIrTxMode(args["irTxMode"] | "")) {
+      error = "irTxMode must be off, push-pull or sink"; return false;
+    }
+    irTxMode = args["irTxMode"].as<String>();
+  }
+  if (!hasSsid && !hasPassword && !hasName && !hasMinPulses && !hasIrTxMode) {
     error = "No settings provided"; return false;
   }
-  JsonObject settings = remoteConfig["settings"].to<JsonObject>();
+  JsonObject settings = remoteConfig["settings"].as<JsonObject>();
+  if (settings.isNull()) settings = remoteConfig["settings"].to<JsonObject>();
   if (hasSsid) settings["apSsid"] = apSsid;
   if (hasPassword) settings["apPassword"] = apPassword;
   if (hasName) settings["bleName"] = bleName;
   if (hasMinPulses) settings["minPulses"] = minPulses;
+  if (hasIrTxMode) settings["irTxMode"] = irTxMode;
   return !remoteConfig.overflowed();
 }
 
-bool saveRemoteConfig() {
-  if (remoteConfig.overflowed() || measureJson(remoteConfig) > 32768) return false;
+bool saveRemoteConfig(String* error) {
+  auto fail = [error](const char* message) {
+    if (error) *error = message;
+    return false;
+  };
+  if (remoteConfig.overflowed()) return fail("Insufficient memory for configuration");
+  if (measureJson(remoteConfig) > kMaxConfigBytes)
+    return fail("Configuration exceeds 32 KiB; remove unused keys, mappings or macros");
   File file = LittleFS.open("/remote-config.tmp", "w");
-  if (!file) return false;
+  if (!file) return fail("Could not open configuration file for writing");
   size_t written = serializeJson(remoteConfig, file);
   file.flush();
   file.close();
-  if (written != measureJson(remoteConfig)) return false;
-  return LittleFS.rename("/remote-config.tmp", kConfigFile);
+  if (written != measureJson(remoteConfig))
+    return fail("Configuration write failed; filesystem may be full");
+  if (!LittleFS.rename("/remote-config.tmp", kConfigFile))
+    return fail("Configuration file replacement failed");
+  return true;
 }
 
 bool remoteStoreBegin() {
@@ -167,10 +199,11 @@ bool remoteStoreBegin() {
     // 条目上限）或体积超过 32KB 时视为致命问题，由调用方格式化 FS。
     if (err) return false;
     for (const char* name : {"remotes", "keys", "macros", "mappings", "hosts"}) {
-      size_t limit = strcmp(name, "hosts") == 0 ? 8 : strcmp(name, "remotes") == 0 ? 12 : 50;
-      if (!remoteConfig[name].is<JsonArray>() || remoteConfig[name].size() > limit) return false;
+      size_t limit = collectionLimit(name);
+      if (!remoteConfig[name].is<JsonArray>() ||
+          (limit && remoteConfig[name].size() > limit)) return false;
     }
-    if (measureJson(remoteConfig) > 32768) return false;
+    if (measureJson(remoteConfig) > kMaxConfigBytes) return false;
     ensureDefaultSettings();
     return true;
   }
@@ -313,8 +346,11 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {
   }
   if (verb != "save") { error = "Unknown operation"; return false; }
   if (!id.isEmpty() && existing.isNull()) { error = "Item not found"; return false; }
-  size_t limit = collection == "remotes" ? 12 : collection == "hosts" ? 8 : 50;
-  if (existing.isNull() && items.size() >= limit) { error = "Collection full"; return false; }
+  size_t limit = collectionLimit(collection.c_str());
+  if (limit && existing.isNull() && items.size() >= limit) {
+    error = collection + " limit reached (" + String(limit) + ")";
+    return false;
+  }
   JsonDocument candidate;
   candidate.set(args);
   JsonObject obj = candidate.as<JsonObject>();
@@ -393,7 +429,7 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {
         error = "Invalid mapping"; return false;
       }
     } else {
-      // 红外发射目标：发射管硬件就绪前只保存不执行（第三期实现重放）。
+      // 红外发射目标必须引用完整采样或纯红外序列。
       if (type == 4) {
         JsonObject outKey = findItem("keys", obj["outKeyId"].as<String>());
         String capture = outKey.isNull() ? "" : (outKey["capturePath"] | "");

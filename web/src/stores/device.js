@@ -20,7 +20,7 @@ const RECONNECT_DELAY_MS = 2000;
  *
  * 固件侧是"命令 + 事件"混合模型：
  *   - 命令：{id, op, args} → {id, ok, ...} 或 {id, ok: false, error}，按 id 配对
- *   - 事件：{event: 'state' | 'input' | 'capture.error'}，无 id 主动推送
+ *   - 事件：{event: 'state' | 'input' | 'capture.error' | 'ir.error'}，无 id 主动推送
  * 不轮询设备，所有状态变化都由 state 事件驱动。
  */
 export const useDeviceStore = defineStore('device', () => {
@@ -102,6 +102,10 @@ export const useDeviceStore = defineStore('device', () => {
       lastInput.value = null;
       captureErrors.value += 1;
       setNotice('红外采样缓冲区溢出，未保存完整数据，请重新学习', 'error');
+      return;
+    }
+    if (data.event === 'ir.error') {
+      setNotice(`红外发射失败：${data.error}`, 'error');
       return;
     }
 
