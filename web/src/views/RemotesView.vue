@@ -198,15 +198,10 @@ async function submitImport() {
     if (!newRemote) throw new Error('创建遥控器失败');
     selectedRemoteId.value = newRemote.id;
 
-    // 3. 逐键写入：每个按键等设备确认成功后再写下一个
-    for (let i = 0; i < keys.length; i++) {
-      const keyIn = keys[i];
-      importProgress.value = {
-        done: uniquePaths.length + i,
-        total: uniquePaths.length + total,
-        currentKey: keyIn.name || keyIn.id,
-      };
-
+    // 3. 批量写入按键：一条 WebSocket 命令完成全部验证与写入，固件只落盘一次。
+    // 逐键 keys.save 会让固件对每个键做全量配置序列化 + flash 擦写，
+    // 几十键的遥控器就是几十次全量写，导入期间设备假死、WS 心跳死亡。
+    const batchKeys = keys.map(keyIn => {
       const keyPayload = {
         name: keyIn.name || keyIn.id,
         remoteId: newRemote.id,
@@ -214,8 +209,16 @@ async function submitImport() {
       if (keyIn.proto) keyPayload.proto = keyIn.proto;
       if (keyIn.code) keyPayload.code = keyIn.code;
       if (keyIn.capturePath) keyPayload.capturePath = keyIn.capturePath;
-
-      await device.commandWithTimeout('keys.save', keyPayload);
+      return keyPayload;
+    });
+    if (batchKeys.length) {
+      importProgress.value = {
+        done: uniquePaths.length,
+        total: uniquePaths.length + total,
+        currentKey: `批量写入 ${batchKeys.length} 个按键…`,
+      };
+      // 批量保存包含逐键验证 + 一次落盘，大遥控器可能超过默认的 15s
+      await device.commandWithTimeout('keys.batchSave', {keys: batchKeys}, 30000);
     }
 
     importProgress.value = {done: uniquePaths.length + total, total: uniquePaths.length + total, currentKey: ''};

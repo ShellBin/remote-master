@@ -2,6 +2,7 @@
 #include "fallback_ui.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <vector>
 
 // ==================== 前端目录布局 ====================
 //
@@ -37,6 +38,31 @@ static bool uploadOk = false;
 static String uploadTarget, uploadError;
 static size_t uploadBytes = 0;
 static File uploadFile;
+
+// 上传写缓冲：攒够 4KB 再落盘，把"每个 TCP 分片一次 flash 事务"降为
+// "每 4KB 一次"，显著缩短 cache 关闭时长与 loop 占用。
+static uint8_t uploadBuf[4096];
+static size_t uploadBufLen = 0;
+
+// ==================== FS 用量缓存 ====================
+
+static uint32_t fsCacheTotal = 0, fsCacheUsed = 0, fsCacheAt = 0;
+static const uint32_t kFsCacheMs = 2000;
+
+void fsUsageRefresh(bool force) {
+  if (!mounted) { fsCacheTotal = fsCacheUsed = 0; return; }
+  uint32_t now = millis();
+  if (!force && fsCacheAt && now - fsCacheAt < kFsCacheMs) return;
+  fsCacheAt = now;
+  fsCacheTotal = LittleFS.totalBytes();
+  fsCacheUsed = LittleFS.usedBytes();
+}
+
+void fsUsageCached(uint32_t& totalBytes, uint32_t& usedBytes) {
+  fsUsageRefresh(false);
+  totalBytes = fsCacheTotal;
+  usedBytes = fsCacheUsed;
+}
 
 // ==================== MIME ====================
 
@@ -105,6 +131,17 @@ static String requestPath(const String& uri) {
 
 // 只接受 /frontend 及其子路径。分段校验同时覆盖目录穿越、空段与
 // LittleFS 的 64 字节对象名限制（CONFIG_LITTLEFS_OBJ_NAME_LEN）。
+// 段内字符限定 [A-Za-z0-9._-]：上传走 query 参数会被 URL 解码，而下载走
+// 原始 URI（含 % 一律拒绝）——白名单保证"能上传的一定能下载/访问"。
+static bool validSegmentChars(const String& path, int start, int end) {
+  for (int i = start; i < end; ++i) {
+    char c = path[i];
+    if (!isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '_' && c != '-')
+      return false;
+  }
+  return true;
+}
+
 static bool writablePath(const String& path) {
   if (path.length() > 120) return false;
   if (path != kFrontendRoot && !path.startsWith("/frontend/")) return false;
@@ -117,6 +154,7 @@ static bool writablePath(const String& path) {
     if (length < 1 || length > 64) return false;
     if (length == 1 && path[start] == '.') return false;
     if (length == 2 && path[start] == '.' && path[start + 1] == '.') return false;
+    if (path != kFrontendRoot && !validSegmentChars(path, start, end)) return false;
     start = end + 1;
   }
   return true;
@@ -151,7 +189,10 @@ static bool uploadPath(const String& path) {
 }
 
 static size_t freeBytes() {
-  return LittleFS.totalBytes() - LittleFS.usedBytes();
+  // 用缓存值：上传是连续过程，2 秒内的用量偏差不影响 kMinFreeBytes 保护判断。
+  uint32_t total, used;
+  fsUsageCached(total, used);
+  return total - used;
 }
 
 // ==================== 目录操作 ====================
@@ -196,9 +237,16 @@ static void appendFiles(JsonArray out, size_t& count) {
   }
 }
 
-// 递归清空目录：每轮只开一个目录句柄并取第一个子项，删除后重新扫描。
-// 边删边扫的写法让目录内容多少都不占用堆内存，同时句柄占用恒定为 2。
+// 递归清空目录：每层先单遍扫描收集全部子项（句柄随取随关），再统一删除。
+// 旧实现每删一个文件就重新扫描一遍目录，n 个文件是 O(n²) 次 flash 目录
+// 读取，几十上百个文件时单次 HTTP 请求能把 loop() 堵死几十秒。
 // 目录本身用 rmdir 删除（空目录），remove 在部分版本的 LittleFS 上对目录不可靠。
+struct ChildEntry {
+  String path;
+  bool isDirectory;
+};
+static const size_t kMaxDirChildren = 256;  // 单层目录扫描的内存上限保护
+
 static bool clearDirectory(const String& path, uint8_t depth) {
   File entry = LittleFS.open(path);
   if (!entry) return true;  // 已不存在，视为成功
@@ -208,22 +256,26 @@ static bool clearDirectory(const String& path, uint8_t depth) {
   }
   entry.close();
   if (depth > kMaxDepth) return false;
-  while (true) {
-    File scan = LittleFS.open(path);
-    if (!scan) break;
-    File child = scan.openNextFile();
-    if (!child) {
-      scan.close();
-      break;
-    }
-    String childPath = child.path();
-    bool isDirectory = child.isDirectory();
+
+  std::vector<ChildEntry> children;
+  File scan = LittleFS.open(path);
+  if (!scan) return false;
+  File child = scan.openNextFile();
+  while (child && children.size() < kMaxDirChildren) {
+    ChildEntry item;
+    item.path = child.path();
+    item.isDirectory = child.isDirectory();
     child.close();
-    scan.close();
-    if (isDirectory) {
-      if (!clearDirectory(childPath, depth + 1)) return false;
-    } else if (!LittleFS.remove(childPath)) {
-      Serial.printf("[FS] remove file failed: %s\n", childPath.c_str());
+    children.push_back(item);
+    child = scan.openNextFile();
+  }
+  scan.close();
+
+  for (const ChildEntry& item : children) {
+    if (item.isDirectory) {
+      if (!clearDirectory(item.path, depth + 1)) return false;
+    } else if (!LittleFS.remove(item.path)) {
+      Serial.printf("[FS] remove file failed: %s\n", item.path.c_str());
       return false;
     }
   }
@@ -261,9 +313,11 @@ static void sendError(int status, const char* message) {
 
 static void handleList() {
   JsonDocument doc;
+  uint32_t total, used;
+  fsUsageCached(total, used);
   doc["mounted"] = true;
-  doc["totalBytes"] = LittleFS.totalBytes();
-  doc["usedBytes"] = LittleFS.usedBytes();
+  doc["totalBytes"] = total;
+  doc["usedBytes"] = used;
   doc["frontendRoot"] = kFrontendRoot;
   JsonArray files = doc["files"].to<JsonArray>();
   size_t count = 0;
@@ -330,16 +384,35 @@ static void handleDelete(const String& path) {
     sendError(500, "Delete failed; check serial log for details");
     return;
   }
+  fsUsageRefresh(true);
   JsonDocument doc;
   doc["ok"] = true;
   doc["path"] = path;
   sendJson(200, doc);
 }
 
+// 把暂存缓冲刷到 flash；失败时返回 false。
+static bool flushUploadBuffer() {
+  if (!uploadBufLen) return true;
+  size_t len = uploadBufLen;
+  uploadBufLen = 0;
+  return uploadFile.write(uploadBuf, len) == len;
+}
+
+static void failUpload(const char* reason, size_t bytes) {
+  uploadOk = false;
+  uploadError = reason;
+  Serial.printf("[FS] upload write error: %s (bytes=%u)\n", uploadError.c_str(), bytes);
+  uploadBufLen = 0;
+  if (uploadFile) uploadFile.close();
+  LittleFS.remove(kUploadTemp);
+}
+
 static void handleUpload(HTTPUpload& upload) {
   if (upload.status == UPLOAD_FILE_START) {
     uploadOk = false;
     uploadBytes = 0;
+    uploadBufLen = 0;
     uploadError = "";
     uploadFile = File();  // 释放上一次上传残留的句柄，避免误关旧文件
     uploadTarget = webServer->arg("path");
@@ -357,20 +430,36 @@ static void handleUpload(HTTPUpload& upload) {
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (!uploadOk) return;
     uploadBytes += upload.currentSize;
+    if (!uploadFile || uploadBytes > kMaxAssetBytes) {
+      failUpload(uploadBytes > kMaxAssetBytes ? "File too large"
+                                              : "Write failed (filesystem full?)",
+                 uploadBytes);
+      return;
+    }
     // 写入目标先落到暂存文件，全部写完再改名，掉电不会留下半个资源文件。
-    if (!uploadFile || uploadBytes > kMaxAssetBytes ||
-        uploadFile.write(upload.buf, upload.currentSize) != upload.currentSize) {
-      uploadOk = false;
-      uploadError = uploadBytes > kMaxAssetBytes ? "File too large" : "Write failed (filesystem full?)";
-      Serial.printf("[FS] upload write error: %s (bytes=%u)\n", uploadError.c_str(), uploadBytes);
-      if (uploadFile) uploadFile.close();
-      LittleFS.remove(kUploadTemp);
+    // 先在 RAM 里攒 4KB，减少 flash 写事务次数（每次写都会关 cache、阻塞 ISR）。
+    const uint8_t* data = upload.buf;
+    size_t remaining = upload.currentSize;
+    while (remaining) {
+      size_t room = sizeof(uploadBuf) - uploadBufLen;
+      size_t chunk = remaining < room ? remaining : room;
+      memcpy(uploadBuf + uploadBufLen, data, chunk);
+      uploadBufLen += chunk;
+      data += chunk;
+      remaining -= chunk;
+      if (uploadBufLen == sizeof(uploadBuf) && !flushUploadBuffer()) {
+        failUpload("Write failed (filesystem full?)", uploadBytes);
+        return;
+      }
     }
   } else if (upload.status == UPLOAD_FILE_END) {
+    if (uploadOk && uploadFile && !flushUploadBuffer())
+      failUpload("Write failed (filesystem full?)", uploadBytes);
     if (uploadFile) {
       uploadFile.flush();
       uploadFile.close();
     }
+    uploadBufLen = 0;
     if (uploadOk) {
       if (!ensureParentDirectories(uploadTarget)) {
         uploadOk = false;
@@ -381,14 +470,17 @@ static void handleUpload(HTTPUpload& upload) {
       }
     }
     if (!uploadOk) LittleFS.remove(kUploadTemp);
+    fsUsageRefresh(true);
     Serial.printf("[FS] upload end: %s (ok=%d, bytes=%u, err=%s)\n",
                   uploadTarget.c_str(), uploadOk, uploadBytes, uploadError.c_str());
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
     uploadOk = false;
     uploadError = "Upload aborted";
     Serial.printf("[FS] upload aborted: %s\n", uploadTarget.c_str());
+    uploadBufLen = 0;
     if (uploadFile) uploadFile.close();
     LittleFS.remove(kUploadTemp);
+    fsUsageRefresh(true);
   }
 }
 
@@ -474,6 +566,7 @@ void fileApiBegin(WebServer& server) {
   webServer = &server;
   // begin() 在已挂载时同样返回成功；totalBytes() 作为兜底判据。
   mounted = LittleFS.begin(false) || LittleFS.totalBytes() > 0;
+  fsUsageRefresh(true);
 
   server.on("/api/files", HTTP_GET, [] {
     if (!mounted) {

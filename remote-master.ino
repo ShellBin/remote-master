@@ -43,6 +43,7 @@ static String learningRemote;
 static uint32_t learningUntil = 0, lastFrameAt = 0, ledUntil = 0;
 static bool storageReady = false;
 static bool stateDirty = false;
+static bool pendingFactoryReset = false;  // system.reset 延迟到 loop() 执行
 static JsonDocument pendingCapture;
 static String pendingCaptureId;
 static String pendingCaptureRemote;
@@ -60,10 +61,14 @@ void socketSend(uint8_t client, JsonDocument& doc) {
   sockets.sendTXT(client, message);
 }
 
-// 差分推送：追踪上次推送的状态，只发送变化的部分
-static String lastConfigJson;
+// 差分推送：追踪上次推送的状态，只发送变化的部分。
+// config 变化用 configRevision 版本号判断（saveRemoteConfig 成功落盘 +1），
+// 不再每次推送都对整个配置做深拷贝 + 全文序列化比较（旧实现一次推送峰值
+// 堆占用超过 200KB，C3 上随时可能 OOM）。
+static uint32_t lastConfigRevision = UINT32_MAX;
 static uint32_t lastFrames = UINT32_MAX;
 static uint32_t lastHeap = UINT32_MAX;
+static uint32_t heapCheckedAt = 0;
 static bool lastStorageReady = true;
 static bool lastHidRunning = true;
 static bool lastIrTxRunning = true;
@@ -81,14 +86,9 @@ void pushState(int client = -1) {
   if (client < 0 && now - lastPush < 50) return;
   lastPush = now;
 
-  // 构建当前 config JSON
-  JsonDocument configDoc;
-  writeConfigSummary(configDoc.to<JsonObject>());
-  String configJson;
-  serializeJson(configDoc, configJson);
-  // 首次连接或显式请求：强制全量 config（必须在 lastConfigJson 更新前检查）
-  bool configChanged = (configJson != lastConfigJson || client >= 0);
-  if (configChanged) lastConfigJson = configJson;
+  // 首次连接或显式请求（client >= 0）强制全量 config
+  bool configChanged = (configRevision != lastConfigRevision || client >= 0);
+  if (configChanged) lastConfigRevision = configRevision;
 
   // 构建当前 status（只包含变化的字段）
   JsonDocument statusDoc;
@@ -96,18 +96,26 @@ void pushState(int client = -1) {
 
   if (learningRemote != lastLearningRemote) { statusDoc["learningRemote"] = learningRemote; lastLearningRemote = learningRemote; statusChanged = true; }
   if (frameCount != lastFrames) { statusDoc["frames"] = frameCount; lastFrames = frameCount; statusChanged = true; }
-  uint32_t heap = ESP.getFreeHeap();
-  if (heap != lastHeap) { statusDoc["heap"] = heap; lastHeap = heap; statusChanged = true; }
+  // heap 几乎每次读取都不同，降频到 1s 且变化超过 2KB 才上报，
+  // 否则 statusChanged 恒真，每次推送都变成全量广播。
+  if (now - heapCheckedAt >= 1000) {
+    heapCheckedAt = now;
+    uint32_t heap = ESP.getFreeHeap();
+    if (lastHeap == UINT32_MAX || heap > lastHeap + 2048 || lastHeap > heap + 2048) {
+      statusDoc["heap"] = heap; lastHeap = heap; statusChanged = true;
+    }
+  }
   if (storageReady != lastStorageReady) { statusDoc["storageReady"] = storageReady; lastStorageReady = storageReady; statusChanged = true; }
   if (hidRunning != lastHidRunning) { statusDoc["hidRunning"] = hidRunning; lastHidRunning = hidRunning; statusChanged = true; }
   bool irTx = irTxBusy();
   if (irTx != lastIrTxRunning) { statusDoc["irTxRunning"] = irTx; lastIrTxRunning = irTx; statusChanged = true; }
-  uint32_t fsTotal = filesystemMounted ? LittleFS.totalBytes() : 0;
+  // FS 用量走缓存：usedBytes() 是 O(整个分区) 的 flash 遍历，不能在高频路径上调
+  uint32_t fsTotal, fsUsed;
+  fsUsageCached(fsTotal, fsUsed);
   if (fsTotal != lastFsTotal) { statusDoc["fsTotal"] = fsTotal; lastFsTotal = fsTotal; statusChanged = true; }
-  uint32_t fsUsed = filesystemMounted ? LittleFS.usedBytes() : 0;
   if (fsUsed != lastFsUsed) { statusDoc["fsUsed"] = fsUsed; lastFsUsed = fsUsed; statusChanged = true; }
 
-  // BLE 状态比较
+  // BLE 状态比较（约 200 字节的小文档，序列化开销可接受）
   JsonDocument bleDoc;
   bleHostStatus(bleDoc.to<JsonObject>());
   String bleJson;
@@ -117,10 +125,10 @@ void pushState(int client = -1) {
   // 没有任何变化则跳过（显式客户端请求除外）
   if (!configChanged && !statusChanged && client < 0) return;
 
-  // 组装最终消息
+  // 组装最终消息：config 只深拷贝这一次，直接进最终文档
   JsonDocument doc;
   doc["event"] = "state";
-  if (configChanged) doc["config"].set(configDoc.as<JsonObjectConst>());
+  if (configChanged) doc["config"].set(remoteConfig.as<JsonObjectConst>());
   if (statusChanged) doc["status"].set(statusDoc.as<JsonObjectConst>());
 
   String message;
@@ -207,13 +215,14 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
       }
     } else if (op == "system.reset") {
       if (!filesystemMounted) error = "Filesystem unavailable";
+      else if (pendingFactoryReset) error = "Reset already in progress";
       else {
         irTxApplyMode("off");
         stopHid("reset");
         learningMode = false; learningRemote = "";
-        bleClearAllBonds();
-        if (!remoteStoreFactoryReset()) error = "Factory reset failed";
-        else { stateDirty = true; storageReady = true; }
+        // 格式化整个 FS 需要数秒，不能在 WS 回调里同步执行（会杀死心跳、
+        // 前端必然超时）。先回包，由 loop() 在下一轮执行真正的重置。
+        pendingFactoryReset = true;
       }
     } else if (!storageReady) {
       error = "Storage unavailable; configuration is read-only";
@@ -292,6 +301,7 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
             bool ok = file && serializeJson(pendingCapture, file) == expected;
             if (file) { file.flush(); file.close(); }
             if (!ok || !LittleFS.rename("/capture.tmp", captureFile)) error = "Capture save failed";
+            else fsUsageRefresh(true);
           }
         }
         // 全新按键但无 capturePath 也无 captureId
@@ -328,18 +338,20 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
       if (!changed || !saveRemoteConfig(&error)) {
         if (error.isEmpty()) error = "Configuration save failed";
         remoteConfig.set(previous);
-        if (!captureFile.isEmpty()) LittleFS.remove(captureFile);
+        if (!captureFile.isEmpty()) { LittleFS.remove(captureFile); fsUsageRefresh(true); }
       } else {
         if (!captureFile.isEmpty()) { pendingCapture.clear(); pendingCaptureId = ""; }
         // Remove replaced/deleted capture files only after configuration commits.
+        bool removedAny = false;
         for (JsonObjectConst oldKey : previous["keys"].as<JsonArrayConst>()) {
           String path = oldKey["capturePath"] | "";
           if (path.isEmpty()) continue;
           bool referenced = false;
           for (JsonObjectConst key : remoteConfig["keys"].as<JsonArrayConst>())
             if (key["capturePath"].as<String>() == path) referenced = true;
-          if (!referenced) LittleFS.remove(path);
+          if (!referenced) { LittleFS.remove(path); removedAny = true; }
         }
+        if (removedAny) fsUsageRefresh(true);
         if (forget && !bleHostForget(address.c_str(), addressType)) {
           remoteConfig.set(previous);
           error = saveRemoteConfig() ? "BLE bond removal failed; host retained"
@@ -384,14 +396,10 @@ void captureIrFrame() {
   IrReceiver.resume();
   bool repeat = data.flags & IRDATA_FLAGS_IS_REPEAT;
   bool overflow = data.flags & IRDATA_FLAGS_WAS_OVERFLOW;
-  // Filter significant hex length, not the zero-padded storage representation.
-  // Repeat packets may contain no code; only reuse an already accepted frame.
-  if (!repeat && data.decodedRawData < 0x10000000ULL) {
-    lastProto[0] = '\0';
-    return;
-  }
   // 可配置的脉冲数下限：短于 n 段的非重复帧视为干扰丢弃（学习与执行均生效）。
   // 重复帧本身只有几段脉冲，不参与该过滤。
+  // 注意：不要按 decodedRawData 的数值大小过滤——Sony 12/15/20bit、RC5/RC6
+  // 等短码协议的解码值永远小于 0x10000000，会被误杀（发射端明确支持它们）。
   int minPulses = remoteConfig["settings"]["minPulses"] | 8;
   if (minPulses < 0) minPulses = 0;
   if (minPulses > RAW_BUFFER_LENGTH) minPulses = RAW_BUFFER_LENGTH;
@@ -464,8 +472,12 @@ void captureIrFrame() {
     sockets.broadcastTXT(message);
     learningUntil = now + 300000;
   } else if (!learningMode) {
-    // 非学习模式也广播 input 事件，用于前端按键卡片高亮提示
-    {
+    // 非学习模式也广播 input 事件，用于前端按键卡片高亮提示。
+    // 节流到 100ms：狂按遥控器时高频广播 + 状态推送会挤占 loop，
+    // 拖慢 WS/HTTP 响应。HID 分发（dispatchInput）不节流，按键响应不受影响。
+    static uint32_t lastInputBroadcast = 0;
+    if (now - lastInputBroadcast >= 100) {
+      lastInputBroadcast = now;
       JsonDocument evt;
       evt["event"] = "input";
       evt["transport"] = "ir";
@@ -494,13 +506,10 @@ void exportData() {
   if (!storageReady) {
     server.send(503, "application/json", "{\"error\":\"Configuration unavailable\"}"); return;
   }
-  server.sendHeader("Content-Disposition", "attachment; filename=\"ir-remote-export.json\"");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json; charset=utf-8", "");
-  server.sendContent("{\"format\":\"esp32-remote\"");
-  String json;
 
-  // scope=macro: 收集该宏引用的所有 keyId（最多 12 个 IR 步骤）
+  // scope=macro: 先收集该宏引用的所有 keyId（最多 12 个 IR 步骤）。
+  // 必须在发出任何响应头之前完成——宏不存在要回 404，而旧实现先发了 200
+  // 状态行再 send(404)，HTTP 流损坏，浏览器会挂起到 30s 超时。
   String macroKeyIds[12];
   int macroKeyIdCount = 0;
   JsonObjectConst exportedMacro;
@@ -520,6 +529,12 @@ void exportData() {
       server.send(404, "application/json", "{\"error\":\"Macro not found\"}"); return;
     }
   }
+
+  server.sendHeader("Content-Disposition", "attachment; filename=\"ir-remote-export.json\"");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json; charset=utf-8", "");
+  server.sendContent("{\"format\":\"esp32-remote\"");
+  String json;
 
   // 辅助：检查 keyId 是否在宏引用的集合中
   auto macroHasKeyId = [&](const String& keyId) -> bool {
@@ -622,8 +637,8 @@ void setup() {
   pinMode(kIrDataPin, INPUT);
   pinMode(kLedPin, OUTPUT); digitalWrite(kLedPin, HIGH);
   IrReceiver.begin(kIrDataPin, DISABLE_LED_FEEDBACK);
-  // 固件自行完成 FS 初始化：未挂载或配置存在致命兼容性问题时直接格式化，
-  // 不做版本向下兼容。格式化后重建默认配置，deploy.mjs 不再负责初始化。
+  // 固件自行完成 FS 初始化：挂载失败才格式化整盘；配置损坏只重建配置，
+  // 前端与红外采样保留（remoteStoreRebuild 会把旧配置改名 .bad 留档）。
   filesystemMounted = LittleFS.begin(false);
   if (!filesystemMounted) {
     Serial.println("[FS] not mounted; formatting");
@@ -633,12 +648,17 @@ void setup() {
   storageReady = filesystemMounted;
   if (storageReady) storageReady = remoteStoreBegin();
   if (!storageReady) {
-    Serial.println("[STORE] config load failed; formatting filesystem and rebuilding");
-    LittleFS.format();
-    filesystemMounted = LittleFS.begin(false);
-    if (filesystemMounted) LittleFS.mkdir("/frontend");
-    storageReady = filesystemMounted && remoteStoreBegin();
-    if (!storageReady) Serial.println("[STORE] rebuild failed; storage unavailable");
+    Serial.println("[STORE] config load failed; rebuilding defaults (frontend preserved)");
+    storageReady = filesystemMounted && remoteStoreRebuild();
+    if (!storageReady) {
+      // 重建失败说明 FS 本身有问题，最后手段才是格式化整盘
+      Serial.println("[STORE] rebuild failed; formatting filesystem");
+      LittleFS.format();
+      filesystemMounted = LittleFS.begin(false);
+      if (filesystemMounted) LittleFS.mkdir("/frontend");
+      storageReady = filesystemMounted && remoteStoreBegin();
+      if (!storageReady) Serial.println("[STORE] rebuild failed; storage unavailable");
+    }
   }
   irTxApplyMode(remoteConfig["settings"]["irTxMode"] | "off");
   WiFi.mode(WIFI_AP);
@@ -653,8 +673,10 @@ void setup() {
     doc["filesystemMounted"] = filesystemMounted;
     doc["websocketPort"] = 81;
     doc["heap"] = ESP.getFreeHeap();
-    doc["fsTotal"] = filesystemMounted ? LittleFS.totalBytes() : 0;
-    doc["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
+    uint32_t fsTotal, fsUsed;
+    fsUsageCached(fsTotal, fsUsed);
+    doc["fsTotal"] = fsTotal;
+    doc["fsUsed"] = fsUsed;
     // 便于在未部署前端时展示实际生效的热点与蓝牙名称。
     doc["apSsid"] = remoteConfig["settings"]["apSsid"] | kApSsid;
     doc["bleName"] = remoteConfig["settings"]["bleName"] | "Remote Master";
@@ -676,8 +698,10 @@ void setup() {
     status["storageReady"] = storageReady;
     status["hidRunning"] = hidRunning;
     status["irTxRunning"] = irTxBusy();
-    status["fsTotal"] = filesystemMounted ? LittleFS.totalBytes() : 0;
-    status["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
+    uint32_t fsTotal, fsUsed;
+    fsUsageCached(fsTotal, fsUsed);
+    status["fsTotal"] = fsTotal;
+    status["fsUsed"] = fsUsed;
     bleHostStatus(status["ble"].to<JsonObject>());
     String message; serializeJson(doc, message);
     server.send(200, "application/json", message);
@@ -692,6 +716,19 @@ void setup() {
 }
 
 void loop() {
+  // system.reset 的实际执行点：响应已在上一轮的 sockets.loop() 里发出，
+  // 这里稍作延迟让 TCP 把回包推出去，再执行数秒级的格式化。
+  if (pendingFactoryReset) {
+    pendingFactoryReset = false;
+    delay(100);
+    Serial.println("[STORE] factory reset: formatting filesystem");
+    bleClearAllBonds();
+    bool ok = remoteStoreFactoryReset();
+    storageReady = ok;
+    fsUsageRefresh(true);
+    Serial.printf("[STORE] factory reset %s\n", ok ? "done" : "FAILED");
+    stateDirty = ok;  // 广播新状态（WS 多半已被格式化期间的停顿杀死，前端会重连）
+  }
   irTxTick();
   if (!irTxBusy() && IrReceiver.decode()) captureIrFrame();
   tickBleHosts();
@@ -719,16 +756,22 @@ void loop() {
       sockets.broadcastTXT(message);
     }
   }
+  // BLE 状态轮询节流到 150ms：旧实现每轮 loop（约每秒上千次）都完整构建并
+  // 序列化一次 BLE 状态 JSON 做字符串比较，纯属浪费 CPU 与堆。
   static size_t hosts = 0;
   static String previousBleStatus;
   static JsonDocument statusDoc;
-  statusDoc.clear();
-  bleHostStatus(statusDoc.to<JsonObject>());
-  String bleStatus;
-  serializeJson(statusDoc, bleStatus);
-  if (previousBleStatus != bleStatus) {
-    previousBleStatus = bleStatus;
-    stateDirty = true;
+  static uint32_t bleStatusAt = 0;
+  if (now - bleStatusAt >= 150) {
+    bleStatusAt = now;
+    statusDoc.clear();
+    bleHostStatus(statusDoc.to<JsonObject>());
+    String bleStatus;
+    serializeJson(statusDoc, bleStatus);
+    if (previousBleStatus != bleStatus) {
+      previousBleStatus = bleStatus;
+      stateDirty = true;
+    }
   }
   if (wasConnected != bleHidConnected() || wasRunning != hidRunning ||
       hosts != remoteConfig["hosts"].size()) stateDirty = true;

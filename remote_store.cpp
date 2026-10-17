@@ -4,6 +4,7 @@
 #include <LittleFS.h>
 
 JsonDocument remoteConfig;
+uint32_t configRevision = 0;
 static const char* kConfigFile = "/remote-config.json";
 static constexpr size_t kMaxConfigBytes = 32768;
 
@@ -187,6 +188,7 @@ bool saveRemoteConfig(String* error) {
     return fail("Configuration write failed; filesystem may be full");
   if (!LittleFS.rename("/remote-config.tmp", kConfigFile))
     return fail("Configuration file replacement failed");
+  ++configRevision;
   return true;
 }
 
@@ -213,12 +215,21 @@ bool remoteStoreBegin() {
 
 // 恢复初始状态：格式化整个文件系统（清空前端、配置、红外采样与出厂绑定），
 // 重新挂载并重建 /frontend 目录与默认配置。BLE 配对由调用方（bleClearAllBonds）
-// 负责清除。格式化后前端页面不可用，用户需重新上传前端产物。
+// 负责清除。格式化后前端页面不可用（回到内置 fallback 页），需重新部署前端。
 bool remoteStoreFactoryReset() {
   LittleFS.end();
   if (!LittleFS.format()) return false;
   if (!LittleFS.begin(false)) return false;
   LittleFS.mkdir("/frontend");
+  resetRemoteConfig();
+  return saveRemoteConfig();
+}
+
+// 配置损坏自愈：旧文件改名留档（.bad），重建默认配置并落盘。
+// 与 factoryReset 不同，这里不动前端资源与红外采样。
+bool remoteStoreRebuild() {
+  LittleFS.remove("/remote-config.bad");
+  if (LittleFS.exists(kConfigFile)) LittleFS.rename(kConfigFile, "/remote-config.bad");
   resetRemoteConfig();
   return saveRemoteConfig();
 }

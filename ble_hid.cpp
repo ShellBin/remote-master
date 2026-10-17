@@ -129,6 +129,7 @@ static std::atomic<int> lastDisconnectReason{0};
 static bool advertisingStarted = false;
 static std::atomic<bool> newHostPairing{false};
 static std::atomic<uint16_t> forgettingHandle{BLE_HS_CONN_HANDLE_NONE};
+static uint32_t forgettingSince = 0;  // forgettingHandle 的兜底超时起点
 
 class HidReportCallbacks : public NimBLECharacteristicCallbacks {
   void onSubscribe(NimBLECharacteristic* characteristic, NimBLEConnInfo& info,
@@ -264,7 +265,15 @@ bool bleReconnectToHost(const String& address, uint8_t addressType) {
 
 void blePairingOpen() {
   stopHid("pair-new-host");
-  forgettingHandle.store(peerHandle.load());
+  // 主动断开当前主机：只打 forgettingHandle 标记等认证回调是踢不掉已加密
+  // 连接的（旧主机不会再触发 onAuthenticationComplete），会导致 tickBleHosts
+  // 永远提前 return、广播无法重启——新主机永远搜不到设备。
+  uint16_t handle = peerHandle.load();
+  if (handle != BLE_HS_CONN_HANDLE_NONE && hidServer) {
+    forgettingHandle.store(handle);
+    forgettingSince = millis();
+    hidServer->disconnect(handle);
+  }
   bleConnected.store(false);
   reportSubscriptions.store(0);
   newHostPairing.store(NimBLEDevice::getNumBonds() > 0);
@@ -293,6 +302,7 @@ bool bleHostForget(const char* address, uint8_t addressType) {
   }
   if (active) {
     forgettingHandle = handle;
+    forgettingSince = millis();
     bleConnected.store(false);
     reportSubscriptions.store(0);
     hidServer->disconnect(handle);
@@ -386,7 +396,13 @@ void tickBleHosts() {
       restartAdvertising.store(true);
   }
   uint16_t handle = peerHandle.load();
-  if (handle == forgettingHandle && handle != BLE_HS_CONN_HANDLE_NONE) return;
+  if (handle == forgettingHandle && handle != BLE_HS_CONN_HANDLE_NONE) {
+    // 等待主动断开完成；超过 5 秒还没断（回调丢失等异常）则放行，
+    // 避免广播重启逻辑被永久卡死。
+    if (millis() - forgettingSince < 5000) return;
+    forgettingHandle = BLE_HS_CONN_HANDLE_NONE;
+    Serial.println("[BLE] forgetting-handle timed out; resuming normal tick");
+  }
   forgettingHandle = BLE_HS_CONN_HANDLE_NONE;
 
   // On successful connection: record host and persist as lastHost
@@ -554,11 +570,13 @@ bool executeBinding(const Binding& b) {
     macroStep = macroTextOffset = 0;
     macroRunning = true;
   } else {
-    // 键盘/鼠标/媒体键：检查同键重复
+    // 键盘/鼠标/媒体键：检查同键重复（红外长按的重复帧约 110ms 一帧）。
+    // 按压窗口是 150ms（见下方 hidDeadline），重复帧在松开前到达即可续上，
+    // 主机看到的就是持续按住，macOS 自动重复才能生效。
     bool sameKey = (hidRunning && !macroRunning && b.type == kTypeKeyboard &&
                     b.key == lastHidKey && b.modifiers == lastHidModifiers);
     if (sameKey) {
-      hidDeadline = millis() + 200;  // 按住 1s（macOS 自动重复需要长按）
+      hidDeadline = millis() + 150;
       Serial.printf("[HID] hold extend key=%u\n", b.key);
       return true;
     }
@@ -595,7 +613,9 @@ bool executeBinding(const Binding& b) {
       }
       break;
   }
-  if (hidNeedsRelease) hidDeadline = millis() + 50;
+  // 按压 150ms 再松开：覆盖红外重复帧 ~110ms 的间隔，同键续帧（sameKey）
+  // 在松开前到达即可形成连续按住；单击场景下 150ms 对主机也无感。
+  if (hidNeedsRelease) hidDeadline = millis() + 150;
   return true;
 }
 

@@ -92,8 +92,9 @@ export const useCatalogStore = defineStore('catalog', () => {
   const reconnectToHost = hostId => device.command('hosts.reconnect', {id: hostId});
   const stopHid = () => device.command('hid.stop');
 
-  // 恢复初始状态：清空所有遥控器、按键、映射、宏、主机与红外采样，重建默认配置。
-  // 前端资源保留，无需重新部署。
+  // 恢复初始状态：固件先回包确认，随后在后台格式化整个文件系统——
+  // 遥控器、按键、映射、宏、主机、红外采样与前端资源全部清空。
+  // 完成后设备回到内置 fallback 页，前端需重新部署。
   const systemReset = () => device.command('system.reset');
 
   return {

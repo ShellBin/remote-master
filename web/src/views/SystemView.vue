@@ -161,7 +161,7 @@ async function resetSystem() {
   if (!confirm('恢复初始状态将格式化整个文件系统（含前端页面），并清除所有已配对蓝牙设备，不可撤销。是否继续？')) return;
   await run(async () => {
     await catalog.systemReset();
-  }, '已恢复初始状态');
+  }, '重置已开始：设备正在格式化文件系统，此页面将断开，完成后请重新部署前端');
 }
 </script>
 
