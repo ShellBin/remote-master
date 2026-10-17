@@ -5,6 +5,7 @@ import {hidKeyLabel, MEDIA_CODES, MODIFIERS, MOUSE_BUTTONS, keyboardCodeToHid} f
 import {ACTION_TYPES, IR_ACTION_TYPES, TARGETS} from '@/lib/mapping';
 import {useCatalogStore} from '@/stores/catalog';
 import ItemCard from '@/components/ItemCard.vue';
+import CascadingSelect from '@/components/CascadingSelect.vue';
 import KeyPickerModal from '@/components/KeyPickerModal.vue';
 
 const catalog = useCatalogStore();

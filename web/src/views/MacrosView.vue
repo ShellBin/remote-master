@@ -198,8 +198,11 @@ async function submitImport() {
 
       if (!newSteps.length) continue; // 跳过无有效步骤的宏
 
+      const name = macro.name || '未命名动作';
+      const existing = catalog.macros.find(m => m.name === name);
       await catalog.save('macros', {
-        name: macro.name || '未命名动作',
+        ...(existing ? {id: existing.id} : {}),
+        name,
         steps: newSteps,
       });
       imported++;
