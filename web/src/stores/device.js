@@ -147,17 +147,17 @@ export const useDeviceStore = defineStore('device', () => {
   /** 请求设备立刻推送一次完整状态（正常无需调用，连上即自动推送）。 */
   const refresh = () => command('state.get');
 
-  /** 通过 HTTP 导出业务数据并触发浏览器下载。scope=remote 时需提供 remoteName 用于命名。 */
-  async function exportData(scope, remoteId = '', remoteName = '') {
+  /** 通过 HTTP 导出业务数据并触发浏览器下载。scope=remote/macro 时需提供 id 与 name 用于命名。 */
+  async function exportData(scope, id = '', name = '') {
     let url = `${httpBase()}/api/export?scope=${encodeURIComponent(scope)}`;
-    if (scope === 'remote' && remoteId) url += `&remoteId=${encodeURIComponent(remoteId)}`;
+    if ((scope === 'remote' || scope === 'macro') && id) url += `&id=${encodeURIComponent(id)}`;
     const response = await fetch(url, {signal: AbortSignal.timeout(30000)});
     if (!response.ok) throw new Error(`导出失败：${await response.text()}`);
     const blob = await response.blob();
     const url2 = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url2;
-    link.download = exportFilename(scope, remoteName);
+    link.download = exportFilename(scope, name);
     document.body.append(link);
     link.click();
     link.remove();

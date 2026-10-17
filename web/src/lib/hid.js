@@ -35,6 +35,55 @@ function buildHidKeys() {
 
 export const HID_KEYS = buildHidKeys();
 
+// 分组下拉用：每组 {label, children: [{value, label}]}
+export const HID_KEY_GROUPS = [
+  {label: '特殊', children: [{value: 0, label: '仅修饰键'}]},
+  {label: '字母', children: buildRange(4, 29, i => ({value: i, label: String.fromCharCode(65 + i - 4)}))},
+  {label: '数字', children: [...buildRange(30, 38, i => ({value: i, label: String(i - 29)})), {value: 39, label: '0'}]},
+  {label: '符号', children: [
+    {value: 45, label: '- _'}, {value: 46, label: '= +'}, {value: 47, label: '[ {'}, {value: 48, label: '] }'}, {value: 49, label: '\\ |'},
+    {value: 51, label: '; :'}, {value: 52, label: '\' "'}, {value: 53, label: '` ~'}, {value: 54, label: ', <'}, {value: 55, label: '. >'}, {value: 56, label: '/ ?'},
+  ]},
+  {label: '控制键', children: [
+    {value: 40, label: 'Enter'}, {value: 41, label: 'Esc'}, {value: 42, label: 'Backspace'}, {value: 43, label: 'Tab'}, {value: 44, label: 'Space'}, {value: 57, label: 'CapsLock'},
+  ]},
+  {label: '功能键', children: buildRange(58, 69, i => ({value: i, label: `F${i - 57}`}))},
+  {label: '编辑键', children: [
+    {value: 74, label: 'Home'}, {value: 75, label: 'PageUp'}, {value: 76, label: 'Delete'}, {value: 77, label: 'End'}, {value: 78, label: 'PageDown'},
+    {value: 79, label: '右'}, {value: 80, label: '左'}, {value: 81, label: '下'}, {value: 82, label: '上'}, {value: 83, label: 'NumLock'},
+  ]},
+];
+
+function buildRange(from, to, fn) {
+  const arr = [];
+  for (let i = from; i <= to; i++) arr.push(fn(i));
+  return arr;
+}
+
+// 键盘 code → HID 键码映射，用于监听物理键盘输入
+const KEYBOARD_TO_HID = new Map([
+  ['KeyA', 4], ['KeyB', 5], ['KeyC', 6], ['KeyD', 7], ['KeyE', 8], ['KeyF', 9],
+  ['KeyG', 10], ['KeyH', 11], ['KeyI', 12], ['KeyJ', 13], ['KeyK', 14], ['KeyL', 15],
+  ['KeyM', 16], ['KeyN', 17], ['KeyO', 18], ['KeyP', 19], ['KeyQ', 20], ['KeyR', 21],
+  ['KeyS', 22], ['KeyT', 23], ['KeyU', 24], ['KeyV', 25], ['KeyW', 26], ['KeyX', 27],
+  ['KeyY', 28], ['KeyZ', 29],
+  ['Digit1', 30], ['Digit2', 31], ['Digit3', 32], ['Digit4', 33], ['Digit5', 34],
+  ['Digit6', 35], ['Digit7', 36], ['Digit8', 37], ['Digit9', 38], ['Digit0', 39],
+  ['Enter', 40], ['Escape', 41], ['Backspace', 42], ['Tab', 43], ['Space', 44],
+  ['Minus', 45], ['Equal', 46], ['BracketLeft', 47], ['BracketRight', 48], ['Backslash', 49],
+  ['Semicolon', 51], ['Quote', 52], ['Backquote', 53], ['Comma', 54], ['Period', 55], ['Slash', 56],
+  ['CapsLock', 57],
+  ['F1', 58], ['F2', 59], ['F3', 60], ['F4', 61], ['F5', 62], ['F6', 63],
+  ['F7', 64], ['F8', 65], ['F9', 66], ['F10', 67], ['F11', 68], ['F12', 69],
+  ['Home', 74], ['PageUp', 75], ['Delete', 76], ['End', 77], ['PageDown', 78],
+  ['ArrowRight', 79], ['ArrowLeft', 80], ['ArrowDown', 81], ['ArrowUp', 82], ['NumLock', 83],
+]);
+
+/** 将 KeyboardEvent.code 转为 HID 键码，无法识别返回 -1。 */
+export function keyboardCodeToHid(code) {
+  return KEYBOARD_TO_HID.get(code) ?? -1;
+}
+
 const hidLabels = new Map(HID_KEYS.map(key => [key.value, key.label]));
 
 export function hidKeyLabel(code) {

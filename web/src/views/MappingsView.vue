@@ -1,9 +1,10 @@
 <script setup>
-import {computed, reactive, ref} from 'vue';
+import {computed, onUnmounted, reactive, ref} from 'vue';
 import {useAction} from '@/composables/useAction';
-import {HID_KEYS, MEDIA_CODES, MODIFIERS, MOUSE_BUTTONS} from '@/lib/hid';
+import {HID_KEY_GROUPS, MEDIA_CODES, MODIFIERS, MOUSE_BUTTONS, keyboardCodeToHid} from '@/lib/hid';
 import {ACTION_TYPES, IR_ACTION_TYPES, TARGETS} from '@/lib/mapping';
 import {useCatalogStore} from '@/stores/catalog';
+import CascadingSelect from '@/components/CascadingSelect.vue';
 import ItemCard from '@/components/ItemCard.vue';
 
 const catalog = useCatalogStore();
@@ -29,12 +30,37 @@ const form = reactive({
 const modifiers = ref([]); // 勾选的修饰键位图成员，提交时按位或合并
 const mapRemoteId = ref('');
 const onlyUnmapped = ref(false);
-const irRemoteId = ref('');
+const listening = ref(false);
+
+function startListenKey() {
+  listening.value = true;
+  window.addEventListener('keydown', onKeyDown, true);
+}
+
+function stopListenKey() {
+  listening.value = false;
+  window.removeEventListener('keydown', onKeyDown, true);
+}
+
+function onKeyDown(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const hid = keyboardCodeToHid(event.code);
+  if (hid >= 0) form.hidKey = hid;
+  stopListenKey();
+}
+
+onUnmounted(stopListenKey);
 
 const selectableKeys = computed(() => catalog.keysOfRemote(mapRemoteId.value)
   .filter(key => !onlyUnmapped.value || !catalog.mappingOf(key.id)));
 
-const outKeys = computed(() => catalog.irKeysOfRemote(irRemoteId.value));
+const irOutGroups = computed(() => catalog.remotes
+  .map(remote => ({
+    label: remote.name,
+    children: catalog.irKeysOfRemote(remote.id).map(key => ({label: key.name, value: key.id})),
+  }))
+  .filter(group => group.children.length));
 
 function resetForm() {
   Object.assign(form, {
@@ -114,7 +140,6 @@ function editMapping(mapping) {
     form.irType = mapping.type;
     if (mapping.type === 4) {
       form.outKeyId = mapping.outKeyId;
-      irRemoteId.value = catalog.keyById(mapping.outKeyId)?.remoteId || '';
     } else {
       form.irMacroId = mapping.macroId || '';
     }
@@ -182,11 +207,20 @@ async function removeMapping(mapping) {
 
             <template v-if="form.actionType === 0">
               <label>按键
-                <select v-model.number="form.hidKey">
-                  <option v-for="key in HID_KEYS" :key="key.value" :value="key.value">{{ key.label }}</option>
-                </select>
+                <CascadingSelect
+                  :modelValue="form.hidKey"
+                  :groups="HID_KEY_GROUPS"
+                  placeholder="选择按键"
+                  @update:modelValue="form.hidKey = $event"
+                />
               </label>
               <div class="actions">
+                <button
+                  type="button"
+                  class="secondary listen-btn"
+                  :class="{active: listening}"
+                  @click="listening ? stopListenKey() : startListenKey()"
+                >{{ listening ? '请按键…' : '按键录入' }}</button>
                 <label v-for="modifier in MODIFIERS" :key="modifier.value" class="check">
                   <input v-model="modifiers" type="checkbox" :value="modifier.value">{{ modifier.label }}
                 </label>
@@ -236,22 +270,14 @@ async function removeMapping(mapping) {
             </label>
 
             <template v-if="form.irType === 4">
-              <div class="fields">
-                <label>目标遥控器
-                  <select v-model="irRemoteId">
-                    <option value="">请选择</option>
-                    <option v-for="remote in catalog.remotes" :key="remote.id" :value="remote.id">
-                      {{ remote.name }}
-                    </option>
-                  </select>
-                </label>
-                <label>目标按键
-                  <select v-model="form.outKeyId" required>
-                    <option value="">请选择</option>
-                    <option v-for="key in outKeys" :key="key.id" :value="key.id">{{ key.name }}</option>
-                  </select>
-                </label>
-              </div>
+              <label>目标红外按键
+                <CascadingSelect
+                  :modelValue="form.outKeyId"
+                  :groups="irOutGroups"
+                  placeholder="选择遥控器 → 按键"
+                  @update:modelValue="form.outKeyId = $event"
+                />
+              </label>
             </template>
 
             <template v-else>
@@ -300,3 +326,9 @@ async function removeMapping(mapping) {
     </div>
   </section>
 </template>
+
+<style scoped>
+.listen-btn{font-size:13px;padding:6px 10px}
+.listen-btn.active{border-color:var(--warn);color:var(--warn);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+</style>

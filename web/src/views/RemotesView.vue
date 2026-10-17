@@ -37,7 +37,16 @@ const learningHere = computed(() => (
 // 动画由每张卡片独立持有，不依赖 class 切换或共享定时器。
 const keyHighlighter = createKeyHighlighter();
 let viewActive = true;
-watch(selectedRemoteId, () => keyHighlighter.clear(), {flush: 'sync'});
+
+// 切换选中遥控器时：若正在学习则停止，清除动画与表单
+async function selectRemote(id) {
+  if (learningHere.value) {
+    await catalog.stopLearning();
+  }
+  selectedRemoteId.value = id;
+  keyHighlighter.clear();
+  resetKeyForm();
+}
 onBeforeUnmount(() => {
   viewActive = false;
   keyHighlighter.dispose();
@@ -308,6 +317,7 @@ async function removeRemote(remote) {
   if (!confirm(`确定删除遥控器「${remote.name}」？需要先删除它下面的所有按键。`)) return;
   await run(() => catalog.remove('remotes', remote.id), '遥控器已删除');
   if (selectedRemoteId.value === remote.id) {
+    if (learningHere.value) await catalog.stopLearning();
     selectedRemoteId.value = '';
     resetKeyForm();
   }
@@ -366,7 +376,7 @@ async function commitRename(key) {
           :key="remote.id"
           class="remote-chip"
           :class="{active: remote.id === selectedRemoteId}"
-          @click="selectedRemoteId = remote.id; resetKeyForm()"
+          @click="selectRemote(remote.id)"
         >
           <span class="remote-chip-name">{{ remote.name }}</span>
           <span class="remote-chip-meta">
@@ -386,7 +396,7 @@ async function commitRename(key) {
       <h2>遥控器按键学习</h2>
 
       <div class="remote-selector">
-        <select v-model="selectedRemoteId" class="remote-select">
+        <select :value="selectedRemoteId" @change="selectRemote($event.target.value)" class="remote-select">
           <option value="">请选择遥控器</option>
           <option v-for="remote in catalog.remotes" :key="remote.id" :value="remote.id">
             {{ remote.name }}（{{ catalog.keysOfRemote(remote.id).length }} 键）
@@ -402,7 +412,6 @@ async function commitRename(key) {
         <p v-if="!['push-pull', 'sink'].includes(catalog.settings.irTxMode)" class="hint">
           红外发射已关闭，请在设置页面选择 GPIO4 驱动模式后使用发射按钮。
         </p>
-        <p v-if="device.status.irTxRunning" class="hint">正在发射红外信号，接收暂时暂停。</p>
 
         <form v-if="learningHere" @submit.prevent="submitKey">
           <div class="key-form-row">

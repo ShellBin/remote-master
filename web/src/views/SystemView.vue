@@ -261,7 +261,6 @@ async function resetSystem() {
       <h3>数据导出</h3>
       <div class="actions">
         <button class="secondary" :disabled="busy" @click="exportData('macros')">导出动作序列</button>
-        <button class="secondary" :disabled="busy" @click="exportData('all')">导出全部业务数据</button>
       </div>
       <p class="hint">单个遥控器的导出请在「遥控器管理」页面操作</p>
 

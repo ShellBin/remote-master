@@ -402,12 +402,12 @@ void captureIrFrame() {
 
 void exportData() {
   String scope = server.arg("scope");
-  String remoteId = server.arg("remoteId");
-  if (scope != "remotes" && scope != "macros" && scope != "all" && scope != "remote") {
+  String id = server.arg("id");
+  if (scope != "remotes" && scope != "macros" && scope != "all" && scope != "remote" && scope != "macro") {
     server.send(400, "application/json", "{\"error\":\"Invalid export scope\"}"); return;
   }
-  if (scope == "remote" && remoteId.isEmpty()) {
-    server.send(400, "application/json", "{\"error\":\"Missing remoteId parameter\"}"); return;
+  if ((scope == "remote" || scope == "macro") && id.isEmpty()) {
+    server.send(400, "application/json", "{\"error\":\"Missing id parameter\"}"); return;
   }
   if (!storageReady) {
     server.send(503, "application/json", "{\"error\":\"Configuration unavailable\"}"); return;
@@ -418,12 +418,51 @@ void exportData() {
   server.sendContent("{\"format\":\"esp32-remote\"");
   String json;
 
+  // scope=macro: 收集该宏引用的所有 keyId（最多 12 个 IR 步骤）
+  String macroKeyIds[12];
+  int macroKeyIdCount = 0;
+  JsonObjectConst exportedMacro;
+  if (scope == "macro") {
+    for (JsonObjectConst m : remoteConfig["macros"].as<JsonArrayConst>()) {
+      if (m["id"].as<String>() == id) {
+        exportedMacro = m;
+        for (JsonObjectConst step : m["steps"].as<JsonArrayConst>()) {
+          if (step["kind"].as<String>() == "ir" && macroKeyIdCount < 12) {
+            macroKeyIds[macroKeyIdCount++] = step["keyId"].as<String>();
+          }
+        }
+        break;
+      }
+    }
+    if (exportedMacro.isNull()) {
+      server.send(404, "application/json", "{\"error\":\"Macro not found\"}"); return;
+    }
+  }
+
+  // 辅助：检查 keyId 是否在宏引用的集合中
+  auto macroHasKeyId = [&](const String& keyId) -> bool {
+    for (int i = 0; i < macroKeyIdCount; i++)
+      if (macroKeyIds[i] == keyId) return true;
+    return false;
+  };
+
   // 1. remotes 数组
   JsonDocument outRemotes;
   JsonArray remotesArr = outRemotes.to<JsonArray>();
   if (scope == "remote") {
     for (JsonObjectConst r : remoteConfig["remotes"].as<JsonArrayConst>())
-      if (r["id"].as<String>() == remoteId) { remotesArr.add(r); break; }
+      if (r["id"].as<String>() == id) { remotesArr.add(r); break; }
+  } else if (scope == "macro") {
+    // 宏中引用的红外按键所属的遥控器（去重）
+    for (JsonObjectConst r : remoteConfig["remotes"].as<JsonArrayConst>()) {
+      bool added = false;
+      for (JsonObjectConst k : remoteConfig["keys"].as<JsonArrayConst>()) {
+        if (macroHasKeyId(k["id"].as<String>()) && k["remoteId"].as<String>() == r["id"].as<String>()) {
+          remotesArr.add(r); added = true; break;
+        }
+      }
+      (void)added; // 仅用于避免未使用警告
+    }
   } else if (scope != "macros") {
     for (JsonObjectConst r : remoteConfig["remotes"].as<JsonArrayConst>()) remotesArr.add(r);
   }
@@ -435,8 +474,9 @@ void exportData() {
   JsonArray keysArr = outKeys.to<JsonArray>();
   for (JsonObjectConst k : remoteConfig["keys"].as<JsonArrayConst>()) {
     String rid = k["remoteId"] | "";
-    if (scope == "remote" && rid != remoteId) continue;
+    if (scope == "remote" && rid != id) continue;
     if (scope == "macros") continue;
+    if (scope == "macro" && !macroHasKeyId(k["id"].as<String>())) continue;
     JsonObject ok = keysArr.add<JsonObject>();
     ok["id"] = k["id"];
     ok["name"] = k["name"];
@@ -454,7 +494,8 @@ void exportData() {
   server.sendContent(",\"captures\":{");
   bool first = true;
   for (JsonObjectConst k : remoteConfig["keys"].as<JsonArrayConst>()) {
-    if (scope == "remote" && k["remoteId"].as<String>() != remoteId) continue;
+    if (scope == "remote" && k["remoteId"].as<String>() != id) continue;
+    if (scope == "macro" && !macroHasKeyId(k["id"].as<String>())) continue;
     String path = k["capturePath"] | "";
     if (path.isEmpty()) continue;
     File capture = LittleFS.open(path, "r");
@@ -472,8 +513,14 @@ void exportData() {
   }
   server.sendContent("}");
 
-  // 4. macros / mappings（仅 scope=all 或 macros）
-  if (scope != "remotes" && scope != "remote") {
+  // 4. macros / mappings
+  if (scope == "macro") {
+    // 仅导出单个宏
+    server.sendContent(",\"macros\":[");
+    json = ""; serializeJson(exportedMacro, json);
+    server.sendContent(json);
+    server.sendContent("]");
+  } else if (scope != "remotes" && scope != "remote") {
     json = ""; serializeJson(remoteConfig["macros"], json);
     server.sendContent(",\"macros\":" + json);
   }
