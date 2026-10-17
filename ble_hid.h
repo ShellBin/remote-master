@@ -16,6 +16,7 @@ void tickBleHosts();
 void bleHostStatus(JsonObject obj);
 void blePairingOpen();
 bool bleHostForget(const char* address, uint8_t addressType);
+void tickKeepAlive();
 
 // 清除所有已配对主机的 BLE 绑定信息（恢复初始状态时调用）
 void bleClearAllBonds();

@@ -72,6 +72,25 @@ export const useDeviceStore = defineStore('device', () => {
     });
   }
 
+  /**
+   * 带超时的命令下发：用于导入等可能耗时较长的操作。
+   * 注意：超时后不自动重试，因为写入操作重试可能导致重复或不一致。
+   */
+  async function commandWithTimeout(op, args = {}, timeoutMs = 15000) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error('设备未连接，请等待 WebSocket 重连'));
+    }
+    const id = ++sequence;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error('设备响应超时，请检查设备状态后重试'));
+      }, timeoutMs);
+      pending.set(id, {resolve, reject, timer});
+      socket.send(JSON.stringify({id, op, args}));
+    });
+  }
+
   function failPending(message) {
     for (const item of pending.values()) {
       clearTimeout(item.timer);
@@ -90,8 +109,8 @@ export const useDeviceStore = defineStore('device', () => {
     }
 
     if (data.event === 'state') {
-      config.value = data.config || emptyConfig();
-      status.value = data.status || {};
+      if (data.config) config.value = data.config;
+      if (data.status) status.value = {...status.value, ...data.status};
       return;
     }
     if (data.event === 'input') {
@@ -118,6 +137,21 @@ export const useDeviceStore = defineStore('device', () => {
     else item.reject(new Error(data.error));
   }
 
+  /** 页面加载时通过 HTTP 获取全量状态（config + status） */
+  async function fetchState() {
+    try {
+      const response = await fetch(`${httpBase()}/api/state`, {signal: AbortSignal.timeout(10000)});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.event === 'state') {
+        config.value = data.config || emptyConfig();
+        status.value = data.status || {};
+      }
+    } catch (error) {
+      setNotice(`初始状态获取失败：${error.message}`, 'error');
+    }
+  }
+
   function connect() {
     if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
       return;
@@ -130,6 +164,7 @@ export const useDeviceStore = defineStore('device', () => {
       if (socket !== ws) return;
       connection.value = 'open';
       setNotice('');
+      fetchState();  // 通过 HTTP 获取全量状态，WebSocket 差分推送可能遗漏字段
     };
     ws.onmessage = event => {
       if (socket === ws) handleMessage(event);
@@ -175,8 +210,10 @@ export const useDeviceStore = defineStore('device', () => {
     ready,
     setNotice,
     command,
+    commandWithTimeout,
     connect,
     refresh,
+    fetchState,
     exportData,
   };
 });

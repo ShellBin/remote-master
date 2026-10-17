@@ -1,11 +1,11 @@
 <script setup>
 import {computed, onUnmounted, reactive, ref} from 'vue';
 import {useAction} from '@/composables/useAction';
-import {HID_KEY_GROUPS, MEDIA_CODES, MODIFIERS, MOUSE_BUTTONS, keyboardCodeToHid} from '@/lib/hid';
+import {hidKeyLabel, MEDIA_CODES, MODIFIERS, MOUSE_BUTTONS, keyboardCodeToHid} from '@/lib/hid';
 import {ACTION_TYPES, IR_ACTION_TYPES, TARGETS} from '@/lib/mapping';
 import {useCatalogStore} from '@/stores/catalog';
-import CascadingSelect from '@/components/CascadingSelect.vue';
 import ItemCard from '@/components/ItemCard.vue';
+import KeyPickerModal from '@/components/KeyPickerModal.vue';
 
 const catalog = useCatalogStore();
 const {busy, run} = useAction();
@@ -27,10 +27,11 @@ const form = reactive({
   irMacroId: '',
 });
 
-const modifiers = ref([]); // 勾选的修饰键位图成员，提交时按位或合并
+const modifiers = ref([]);
 const mapRemoteId = ref('');
 const onlyUnmapped = ref(false);
 const listening = ref(false);
+const pickerOpen = ref(false);
 
 function startListenKey() {
   listening.value = true;
@@ -51,6 +52,19 @@ function onKeyDown(event) {
 }
 
 onUnmounted(stopListenKey);
+
+// HID 按键选择模态框
+function openKeyPicker() {
+  pickerOpen.value = true;
+}
+function onPickerSelect(result) {
+  form.hidKey = result.key;
+  modifiers.value = MODIFIERS.filter(m => result.modifiers & m.value).map(m => m.value);
+  pickerOpen.value = false;
+}
+function closePicker() {
+  pickerOpen.value = false;
+}
 
 const selectableKeys = computed(() => catalog.keysOfRemote(mapRemoteId.value)
   .filter(key => !onlyUnmapped.value || !catalog.mappingOf(key.id)));
@@ -207,20 +221,11 @@ async function removeMapping(mapping) {
 
             <template v-if="form.actionType === 0">
               <label>按键
-                <CascadingSelect
-                  :modelValue="form.hidKey"
-                  :groups="HID_KEY_GROUPS"
-                  placeholder="选择按键"
-                  @update:modelValue="form.hidKey = $event"
-                />
+                <button type="button" class="secondary" @click="openKeyPicker" style="width:100%;text-align:left">
+                  {{ hidKeyLabel(form.hidKey) }}{{ modifiers.length ? ' + ' + modifiers.map(m => MODIFIERS.find(mod => mod.value === m)?.label?.replace(' / Win', '')).join('+') : '' }}
+                </button>
               </label>
               <div class="actions">
-                <button
-                  type="button"
-                  class="secondary listen-btn"
-                  :class="{active: listening}"
-                  @click="listening ? stopListenKey() : startListenKey()"
-                >{{ listening ? '请按键…' : '按键录入' }}</button>
                 <label v-for="modifier in MODIFIERS" :key="modifier.value" class="check">
                   <input v-model="modifiers" type="checkbox" :value="modifier.value">{{ modifier.label }}
                 </label>
@@ -325,6 +330,15 @@ async function removeMapping(mapping) {
       </article>
     </div>
   </section>
+
+  <KeyPickerModal
+    v-if="pickerOpen"
+    mode="hid"
+    :value="form.hidKey"
+    :modifiers="modifiers.reduce((sum, v) => sum | v, 0)"
+    @select="onPickerSelect"
+    @close="closePicker"
+  />
 </template>
 
 <style scoped>

@@ -60,35 +60,69 @@ void socketSend(uint8_t client, JsonDocument& doc) {
   sockets.sendTXT(client, message);
 }
 
+// 差分推送：追踪上次推送的状态，只发送变化的部分
+static String lastConfigJson;
+static uint32_t lastFrames = UINT32_MAX;
+static uint32_t lastHeap = UINT32_MAX;
+static bool lastStorageReady = true;
+static bool lastHidRunning = true;
+static bool lastIrTxRunning = true;
+static uint32_t lastFsTotal = UINT32_MAX;
+static uint32_t lastFsUsed = UINT32_MAX;
+static String lastBleJson;
+static String lastLearningRemote;
+
 void pushState(int client = -1) {
+  // 优化：无 WebSocket 客户端时不序列化
+  if (client < 0 && sockets.connectedClients() == 0) { stateDirty = false; return; }
+  // 优化：节流，每 50ms 最多推送一次
+  static uint32_t lastPush = 0;
+  uint32_t now = millis();
+  if (client < 0 && now - lastPush < 50) return;
+  lastPush = now;
+
+  // 构建当前 config JSON
+  JsonDocument configDoc;
+  writeConfigSummary(configDoc.to<JsonObject>());
+  String configJson;
+  serializeJson(configDoc, configJson);
+  // 首次连接或显式请求：强制全量 config（必须在 lastConfigJson 更新前检查）
+  bool configChanged = (configJson != lastConfigJson || client >= 0);
+  if (configChanged) lastConfigJson = configJson;
+
+  // 构建当前 status（只包含变化的字段）
+  JsonDocument statusDoc;
+  bool statusChanged = false;
+
+  if (learningRemote != lastLearningRemote) { statusDoc["learningRemote"] = learningRemote; lastLearningRemote = learningRemote; statusChanged = true; }
+  if (frameCount != lastFrames) { statusDoc["frames"] = frameCount; lastFrames = frameCount; statusChanged = true; }
+  uint32_t heap = ESP.getFreeHeap();
+  if (heap != lastHeap) { statusDoc["heap"] = heap; lastHeap = heap; statusChanged = true; }
+  if (storageReady != lastStorageReady) { statusDoc["storageReady"] = storageReady; lastStorageReady = storageReady; statusChanged = true; }
+  if (hidRunning != lastHidRunning) { statusDoc["hidRunning"] = hidRunning; lastHidRunning = hidRunning; statusChanged = true; }
+  bool irTx = irTxBusy();
+  if (irTx != lastIrTxRunning) { statusDoc["irTxRunning"] = irTx; lastIrTxRunning = irTx; statusChanged = true; }
+  uint32_t fsTotal = filesystemMounted ? LittleFS.totalBytes() : 0;
+  if (fsTotal != lastFsTotal) { statusDoc["fsTotal"] = fsTotal; lastFsTotal = fsTotal; statusChanged = true; }
+  uint32_t fsUsed = filesystemMounted ? LittleFS.usedBytes() : 0;
+  if (fsUsed != lastFsUsed) { statusDoc["fsUsed"] = fsUsed; lastFsUsed = fsUsed; statusChanged = true; }
+
+  // BLE 状态比较
+  JsonDocument bleDoc;
+  bleHostStatus(bleDoc.to<JsonObject>());
+  String bleJson;
+  serializeJson(bleDoc, bleJson);
+  if (bleJson != lastBleJson) { statusDoc["ble"].set(bleDoc.as<JsonObjectConst>()); lastBleJson = bleJson; statusChanged = true; }
+
+  // 没有任何变化则跳过（显式客户端请求除外）
+  if (!configChanged && !statusChanged && client < 0) return;
+
+  // 组装最终消息
   JsonDocument doc;
   doc["event"] = "state";
-  writeConfigSummary(doc["config"].to<JsonObject>());
-  JsonObject status = doc["status"].to<JsonObject>();
-  status["learningRemote"] = learningRemote;
-  status["frames"] = frameCount;
-  status["heap"] = ESP.getFreeHeap();
-  status["storageReady"] = storageReady;
-  status["hidRunning"] = hidRunning;
-  status["irTxRunning"] = irTxBusy();
-  status["fsTotal"] = filesystemMounted ? LittleFS.totalBytes() : 0;
-  status["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
-  bleHostStatus(status["ble"].to<JsonObject>());
-  // WiFi 已连接设备
-  wifi_sta_list_t wifi_sta;
-  if (esp_wifi_ap_get_sta_list(&wifi_sta) == ESP_OK) {
-    JsonArray stations = status["wifiStations"].to<JsonArray>();
-    for (int i = 0; i < wifi_sta.num; i++) {
-      JsonObject sta = stations.add<JsonObject>();
-      char macStr[18];
-      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-               wifi_sta.sta[i].mac[0], wifi_sta.sta[i].mac[1],
-               wifi_sta.sta[i].mac[2], wifi_sta.sta[i].mac[3],
-               wifi_sta.sta[i].mac[4], wifi_sta.sta[i].mac[5]);
-      sta["mac"] = macStr;
-      sta["rssi"] = wifi_sta.sta[i].rssi;
-    }
-  }
+  if (configChanged) doc["config"].set(configDoc.as<JsonObjectConst>());
+  if (statusChanged) doc["status"].set(statusDoc.as<JsonObjectConst>());
+
   String message;
   serializeJson(doc, message);
   if (client < 0) sockets.broadcastTXT(message);
@@ -101,13 +135,16 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
   JsonDocument request, response;
   String error;
   bool applyApAfter = false, applyBleNameAfter = false;
-  if (length > 4096 || deserializeJson(request, payload, length)) error = "Invalid or oversized JSON";
+  if (length > 8192 || deserializeJson(request, payload, length)) error = "Invalid or oversized JSON";
   response["id"] = request["id"];
   String op = request["op"] | "";
   JsonObjectConst args = request["args"].as<JsonObjectConst>();
   if (error.isEmpty()) {
     if (op == "state.get") {
       pushState(client);
+      response["ok"] = true;
+      socketSend(client, response);
+      return;
     } else if (op == "learn.start") {
       String id = args["remoteId"] | "";
       bool found = false;
@@ -190,6 +227,48 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
         socketSend(client, response);
         return;
       }
+
+      // 批量保存按键：一次性验证并写入多个按键，只落盘一次
+      if (op == "keys.batchSave") {
+        JsonArrayConst batchKeys = args["keys"].as<JsonArrayConst>();
+        Serial.printf("[CMD] keys.batchSave: %u keys\n", batchKeys.isNull() ? 0 : batchKeys.size());
+        if (batchKeys.isNull() || batchKeys.size() == 0) {
+          error = "No keys provided";
+        } else {
+          // 逐个验证 capture 文件存在性并执行内存中的保存
+          for (JsonObjectConst keyArgs : batchKeys) {
+            if (!error.isEmpty()) break;
+            // 验证 capturePath（导入流程：有 capturePath 无 id）
+            String capPath = keyArgs["capturePath"] | "";
+            if (!capPath.isEmpty() && !keyArgs.containsKey("id")) {
+              if (!LittleFS.exists(capPath)) {
+                error = "Capture file not found: " + capPath;
+                Serial.printf("[CMD] batchSave error: %s\n", error.c_str());
+                break;
+              }
+            }
+            // 调用 remoteStoreCommand 修改内存中的配置（不落盘）
+            String keyError;
+            if (!remoteStoreCommand("keys.save", keyArgs, keyError)) {
+              error = keyError.isEmpty() ? "Key save failed" : keyError;
+              Serial.printf("[CMD] batchSave key error: %s\n", error.c_str());
+            }
+          }
+          // 所有按键验证通过后，一次性写入配置文件
+          if (error.isEmpty()) {
+            if (!saveRemoteConfig(&error)) {
+              if (error.isEmpty()) error = "Configuration save failed";
+              Serial.printf("[CMD] batchSave config save error: %s\n", error.c_str());
+              remoteConfig.set(previous);
+            } else {
+              Serial.printf("[CMD] batchSave success: saved config\n");
+              stateDirty = true;
+            }
+          } else {
+            remoteConfig.set(previous);
+          }
+        }
+      } else {
       String captureFile;
       if (op == "keys.save") {
         // 导入流程：有 capturePath 无 id（新按键，采样文件已预上传）
@@ -282,6 +361,7 @@ void socketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length)
         }
         stateDirty = true;
       }
+      } // end else (single-key commands)
     }
   }
   response["ok"] = error.isEmpty();
@@ -403,6 +483,8 @@ void captureIrFrame() {
 void exportData() {
   String scope = server.arg("scope");
   String id = server.arg("id");
+  if (scope == "remote" && id.isEmpty()) id = server.arg("remoteId");
+  if (scope == "macro" && id.isEmpty()) id = server.arg("macroId");
   if (scope != "remotes" && scope != "macros" && scope != "all" && scope != "remote" && scope != "macro") {
     server.send(400, "application/json", "{\"error\":\"Invalid export scope\"}"); return;
   }
@@ -582,12 +664,30 @@ void setup() {
     String message; serializeJson(doc, message);
     server.send(200, "application/json", message);
   });
+  // 全量状态接口：页面加载时 HTTP 请求获取完整 config + status，后续用 WS 差分更新
+  server.on("/api/state", HTTP_GET, [] {
+    JsonDocument doc;
+    doc["event"] = "state";
+    writeConfigSummary(doc["config"].to<JsonObject>());
+    JsonObject status = doc["status"].to<JsonObject>();
+    status["learningRemote"] = learningRemote;
+    status["frames"] = frameCount;
+    status["heap"] = ESP.getFreeHeap();
+    status["storageReady"] = storageReady;
+    status["hidRunning"] = hidRunning;
+    status["irTxRunning"] = irTxBusy();
+    status["fsTotal"] = filesystemMounted ? LittleFS.totalBytes() : 0;
+    status["fsUsed"] = filesystemMounted ? LittleFS.usedBytes() : 0;
+    bleHostStatus(status["ble"].to<JsonObject>());
+    String message; serializeJson(doc, message);
+    server.send(200, "application/json", message);
+  });
   // 未命中任何显式路由时按 /frontend 静态资源处理（含 SPA 路由回退）。
   server.onNotFound([] { fileApiServeStatic(server.uri()); });
   server.begin();
   sockets.begin();
   sockets.onEvent(socketEvent);
-  sockets.enableHeartbeat(15000, 3000, 2);
+  sockets.enableHeartbeat(30000, 5000, 2);
   Serial.printf("[WEB] http://%s; WebSocket port 81\n", WiFi.softAPIP().toString().c_str());
 }
 
@@ -603,6 +703,7 @@ void loop() {
   digitalWrite(kLedPin, static_cast<int32_t>(ledUntil - now) > 0 && ((now / 60) & 1) ? LOW : HIGH);
   server.handleClient();
   sockets.loop();
+  tickKeepAlive();
   static bool wasConnected = false, wasRunning = false, wasIrTxRunning = false;
   static String previousIrTxError;
   if (wasIrTxRunning != irTxBusy()) stateDirty = true;
@@ -620,10 +721,11 @@ void loop() {
   }
   static size_t hosts = 0;
   static String previousBleStatus;
-  JsonDocument status;
-  bleHostStatus(status.to<JsonObject>());
+  static JsonDocument statusDoc;
+  statusDoc.clear();
+  bleHostStatus(statusDoc.to<JsonObject>());
   String bleStatus;
-  serializeJson(status, bleStatus);
+  serializeJson(statusDoc, bleStatus);
   if (previousBleStatus != bleStatus) {
     previousBleStatus = bleStatus;
     stateDirty = true;

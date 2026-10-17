@@ -99,7 +99,7 @@ article{padding:24px;background:var(--card);border:1px solid var(--line);border-
 
 /* 步骤 */
 .steps{margin:18px 0}
-.step{display:grid;grid-template-columns:110px 1fr auto;gap:8px;align-items:center}
+.step{display:grid;grid-template-columns:110px 1fr auto auto;gap:8px;align-items:center}
 .step input,.step select{margin:0}
 .step>div{display:flex;gap:8px;flex-wrap:wrap}
 .step>div>*{flex:1;min-width:110px}
@@ -137,15 +137,6 @@ article{padding:24px;background:var(--card);border:1px solid var(--line);border-
 /* Footer */
 footer{margin:24px 0;text-align:center;font-size:12px}
 
-/* WiFi 已连接设备 */
-.stations{margin:8px 0}
-.station-item{display:flex;gap:12px;align-items:center;padding:8px 0;border-top:1px solid var(--line);flex-wrap:wrap}
-.station-item:first-child{border-top:0}
-.station-mac{font-family:monospace;font-size:13px;color:var(--text)}
-.station-ip,.station-rssi{font-size:12px;color:var(--muted)}
-.station-count{display:inline-block;background:var(--accent);color:#06231c;font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px;margin-left:8px;vertical-align:1px}
-
-/* 蓝牙状态网格 */
 .ble-status{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin:8px 0}
 .ble-status-item{display:flex;flex-direction:column;gap:2px;padding:8px 10px;background:#141f31;border:1px solid var(--line);border-radius:6px}
 .ble-status-label{font-size:11px;color:var(--muted);text-transform:none}

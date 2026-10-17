@@ -1,5 +1,5 @@
 <script setup>
-import {computed, onBeforeUnmount, onMounted, onUnmounted, ref} from 'vue';
+import {computed, onBeforeUnmount, onMounted, ref} from 'vue';
 import {HID_KEY_GROUPS, MODIFIERS, keyboardCodeToHid} from '@/lib/hid';
 import {useCatalogStore} from '@/stores/catalog';
 
@@ -9,43 +9,36 @@ import {useCatalogStore} from '@/stores/catalog';
 const props = defineProps({
   mode: {type: String, required: true}, // 'hid' | 'ir'
   value: {type: [Number, String], default: ''},
+  modifiers: {type: Number, default: 0}, // 修饰键位图
 });
 const emit = defineEmits(['select', 'close']);
 
 const catalog = useCatalogStore();
 
-const listening = ref(false);
-
 function onKeyDown(event) {
-  event.preventDefault();
-  event.stopPropagation();
+  const el = event.target;
+  // 跳过文本输入框；复选框、按钮等均正常捕获键盘输入
+  if (el?.tagName === 'TEXTAREA') return;
+  if (el?.tagName === 'INPUT' && el.type !== 'checkbox') return;
+  if (event.code === 'Escape') return; // 由 onEsc 处理关闭
   const hid = keyboardCodeToHid(event.code);
   if (hid >= 0) {
-    emit('select', {key: hid, modifiers: selectedMods.value});
-    listening.value = false;
-    window.removeEventListener('keydown', onKeyDown, true);
+    event.preventDefault();
+    save(hid);
   }
 }
 
-function startListen() {
-  listening.value = true;
-  window.addEventListener('keydown', onKeyDown, true);
-}
-
-function stopListen() {
-  listening.value = false;
-  window.removeEventListener('keydown', onKeyDown, true);
-}
-
-onUnmounted(stopListen);
-
 // HID 模式：当前选中的键码
 const selectedKey = ref(props.value);
-const selectedMods = ref(0);
+const selectedMods = ref(props.modifiers);
 
 function selectHidKey(key) {
   selectedKey.value = key;
-  emit('select', {key, modifiers: selectedMods.value});
+}
+
+function save(key) {
+  if (key !== undefined) selectedKey.value = key;
+  emit('select', {key: selectedKey.value, modifiers: selectedMods.value});
 }
 
 function toggleMod(modValue) {
@@ -68,8 +61,14 @@ function onBackdropClick(event) {
   if (event.target === event.currentTarget) emit('close');
 }
 
-onMounted(() => document.addEventListener('keydown', onEsc, true));
-onBeforeUnmount(() => document.removeEventListener('keydown', onEsc, true));
+onMounted(() => {
+  document.addEventListener('keydown', onEsc, true);
+  if (props.mode === 'hid') window.addEventListener('keydown', onKeyDown);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onEsc, true);
+  window.removeEventListener('keydown', onKeyDown);
+});
 
 function onEsc(event) {
   if (event.key === 'Escape') emit('close');
@@ -92,7 +91,7 @@ function onEsc(event) {
                   v-for="item in group.children"
                   :key="item.value"
                   class="kp-item"
-                  :class="{selected: item.value === value}"
+                  :class="{selected: item.value === selectedKey}"
                   @click="selectHidKey(item.value)"
                 >{{ item.label }}</div>
               </div>
@@ -109,13 +108,6 @@ function onEsc(event) {
               >{{ mod.label }}
             </label>
           </div>
-
-          <button
-            type="button"
-            class="secondary kp-listen"
-            :class="{active: listening}"
-            @click="listening ? stopListen() : startListen()"
-          >{{ listening ? '请按键盘…' : '按键录入' }}</button>
         </template>
 
         <!-- 红外按键模式 -->
@@ -138,6 +130,7 @@ function onEsc(event) {
         </template>
 
         <div class="modal-actions">
+          <button v-if="mode === 'hid'" type="button" @click="save()">保存</button>
           <button class="secondary" type="button" @click="emit('close')">取消</button>
         </div>
       </div>
@@ -155,7 +148,4 @@ function onEsc(event) {
 .kp-item.selected{background:var(--accent);border-color:var(--accent);color:#fff}
 .kp-mods{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .kp-mods-label{font-size:13px;color:var(--muted)}
-.kp-listen{flex:0 0 auto;font-size:13px;padding:6px 14px}
-.kp-listen.active{border-color:var(--warn);color:var(--warn);animation:pulse 1s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 </style>

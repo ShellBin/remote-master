@@ -343,6 +343,7 @@ static void handleUpload(HTTPUpload& upload) {
     uploadError = "";
     uploadFile = File();  // 释放上一次上传残留的句柄，避免误关旧文件
     uploadTarget = webServer->arg("path");
+    Serial.printf("[FS] upload start: %s\n", uploadTarget.c_str());
     if (!mounted) uploadError = "Filesystem not mounted";
     else if (!uploadPath(uploadTarget)) uploadError = "Only /frontend/<file> is writable";
     else if (freeBytes() < kMinFreeBytes) uploadError = "Not enough free space";
@@ -361,6 +362,7 @@ static void handleUpload(HTTPUpload& upload) {
         uploadFile.write(upload.buf, upload.currentSize) != upload.currentSize) {
       uploadOk = false;
       uploadError = uploadBytes > kMaxAssetBytes ? "File too large" : "Write failed (filesystem full?)";
+      Serial.printf("[FS] upload write error: %s (bytes=%u)\n", uploadError.c_str(), uploadBytes);
       if (uploadFile) uploadFile.close();
       LittleFS.remove(kUploadTemp);
     }
@@ -379,9 +381,12 @@ static void handleUpload(HTTPUpload& upload) {
       }
     }
     if (!uploadOk) LittleFS.remove(kUploadTemp);
+    Serial.printf("[FS] upload end: %s (ok=%d, bytes=%u, err=%s)\n",
+                  uploadTarget.c_str(), uploadOk, uploadBytes, uploadError.c_str());
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
     uploadOk = false;
     uploadError = "Upload aborted";
+    Serial.printf("[FS] upload aborted: %s\n", uploadTarget.c_str());
     if (uploadFile) uploadFile.close();
     LittleFS.remove(kUploadTemp);
   }

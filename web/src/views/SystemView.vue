@@ -27,9 +27,7 @@ watch(() => catalog.settings, settings => {
   syncFromSettings(settings);
 }, {immediate: true, deep: true});
 
-// WiFi 已连接设备端点 - 从 WebSocket 推送的状态中获取
-const wifiStations = computed(() => device.status.wifiStations || []);
-const stationCount = computed(() => wifiStations.value.length);
+
 
 // 蓝牙断开原因映射（HCI 错误码 → 中文）
 const disconnectReasons = {
@@ -183,14 +181,7 @@ async function resetSystem() {
         </div>
       </form>
 
-      <h3>已连接设备<span class="station-count">{{ stationCount }}</span></h3>
-      <div v-if="wifiStations.length" class="stations">
-        <div v-for="sta in wifiStations" :key="sta.mac" class="station-item">
-          <span class="station-mac">{{ sta.mac }}</span>
-          <span v-if="sta.rssi" class="station-rssi">{{ sta.rssi }} dBm</span>
-        </div>
-      </div>
-      <p v-else class="hint">暂无设备连接到此热点。</p>
+
     </article>
 
     <!-- 蓝牙 -->

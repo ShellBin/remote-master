@@ -1,5 +1,6 @@
 #include "ble_hid.h"
 #include "globals.h"
+#include "ir_tx.h"
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include "remote_store.h"
@@ -154,7 +155,7 @@ class HidServerCallbacks : public NimBLEServerCallbacks {
     }
     Serial.printf("[BLE] connected address=%s handle=%u\n",
                   info.getAddress().toString().c_str(), info.getConnHandle());
-    server->updateConnParams(info.getConnHandle(), 12, 24, 0, 400);
+    server->updateConnParams(info.getConnHandle(), 9, 12, 0, 1000);
     int rc = 0;
     bool started = NimBLEDevice::startSecurity(info.getConnHandle(), &rc);
     Serial.printf("[BLE] security started=%u rc=%d\n", started, rc);
@@ -365,6 +366,17 @@ static bool resolveLastHost(String& address, uint8_t& addressType) {
   return false;
 }
 
+// 从 hosts 配置中查找指定地址对应的 addressType
+static bool resolveHostType(const String& address, uint8_t& addressType) {
+  for (JsonObjectConst host : remoteConfig["hosts"].as<JsonArrayConst>()) {
+    if (host["address"].as<String>() == address) {
+      addressType = host["addressType"] | 0;
+      return true;
+    }
+  }
+  return false;
+}
+
 void tickBleHosts() {
   // BLE callbacks only set atomics. Filesystem and JSON work stay on loop().
   if (pairingUntil && static_cast<int32_t>(millis() - pairingUntil) >= 0) {
@@ -421,6 +433,13 @@ void tickBleHosts() {
 
   if (!restartAdvertising.exchange(false)) return;
 
+  // 保存 reconnect 目标（bleReconnectToHost 设置），避免被清空后丢失
+  String savedTryingHost = tryingHost;
+  uint8_t savedTryingType = 0;
+  if (!savedTryingHost.isEmpty()) {
+    resolveHostType(savedTryingHost, savedTryingType);
+  }
+
   // 配置广播：有目标则白名单过滤，否则开放可发现
   auto advertising = NimBLEDevice::getAdvertising();
   advertising->stop();
@@ -432,13 +451,12 @@ void tickBleHosts() {
   String targetAddress;
   uint8_t targetType = 0;
 
-  // 优先使用用户指定的目标（bleReconnectToHost 设置了 tryingHost），
-  // 否则回退到 lastHost
-  // 注意：bleReconnectToHost 的 tryingHost 在上面被清空了，需要从状态判断
-  // 实际上 bleReconnectToHost 设了 tryingHost 然后触发 restartAdvertising，
-  // 但 tryingHost 在 disconnect 时被清空。我们改用 lastHostId 来判断目标。
-
-  if (!unpaired && !pairingUntil) {
+  // 优先使用 reconnect 指定的目标（bleReconnectToHost 设置的 tryingHost），
+  // 否则回退到 lastHostId
+  if (!savedTryingHost.isEmpty()) {
+    targetAddress = savedTryingHost;
+    targetType = savedTryingType;
+  } else if (!unpaired && !pairingUntil) {
     resolveLastHost(targetAddress, targetType);
   }
 
@@ -455,9 +473,13 @@ void tickBleHosts() {
     NimBLEAddress addr(std::string(targetAddress.c_str()), targetType);
     NimBLEDevice::whiteListAdd(addr);
     advertising->setScanFilter(false, true);
+  } else if (!unpaired && !pairingUntil) {
+    // 有 bond 但目标不可达 — 开放可发现（fallback），避免设备假死
+    advertising->setScanFilter(false, false);
+    Serial.printf("[BLE] WARNING: target not bonded, advertising openly\n");
   } else {
     // 无配对主机或配对窗口开放：可被发现
-    advertising->setScanFilter(false, !unpaired && !pairingUntil);
+    advertising->setScanFilter(false, false);
   }
   advertisingStarted = advertising->start();
   Serial.printf("[BLE] advertising started=%u pairing=%u whitelist=%u trying=%s\n",
@@ -465,25 +487,40 @@ void tickBleHosts() {
                 static_cast<unsigned>(NimBLEDevice::getWhiteListCount()), tryingHost.c_str());
 }
 
+// Fix: 空闲心跳，每 3 秒发送空报告防止 macOS 监管超时断连
+static uint32_t lastKeepAlive = 0;
+static bool keepAliveSent = false;
+void tickKeepAlive() {
+  if (!bleConnected.load()) { lastKeepAlive = millis(); return; }
+  if (hidRunning) { lastKeepAlive = millis(); return; }
+  if (millis() - lastKeepAlive < 3000) return;
+  // 发送空报告维持链路
+  uint8_t emptyReport[8] = {0};
+  if (inputKeyboard) { inputKeyboard->setValue(emptyReport, 8); inputKeyboard->notify(); }
+  lastKeepAlive = millis();
+}
+
 // ==================== HID 动作执行 ====================
+
+// 追踪上次发送的报告类型，避免 releaseHid 发送多余报告导致 BLE 阻塞
+static uint8_t activeReports = 0; // bit0=keyboard, bit1=mouse, bit2=consumer
 
 void sendRawKey(uint8_t key, uint8_t modifiers) {
   uint8_t report[8] = {modifiers, 0, key, 0, 0, 0, 0, 0};
   inputKeyboard->setValue(report, sizeof(report));
   inputKeyboard->notify();
+  activeReports |= 1;
+  Serial.printf("[HID] send key=%u mod=%u\n", key, modifiers);
 }
 
 void releaseHid() {
-  if (!bleConnected.load()) return;
-  // 释放键盘
-  uint8_t keyReport[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-  if (inputKeyboard) { inputKeyboard->setValue(keyReport, 8); inputKeyboard->notify(); }
-  // 释放鼠标
-  uint8_t mouseReport[4] = {0, 0, 0, 0};
-  if (inputMouse) { inputMouse->setValue(mouseReport, 4); inputMouse->notify(); }
-  // 释放媒体键
-  uint8_t consumerReport[2] = {0, 0};
-  if (inputConsumer) { inputConsumer->setValue(consumerReport, 2); inputConsumer->notify(); }
+  if (!bleConnected.load()) { activeReports = 0; return; }
+  uint8_t empty[8] = {0};
+  if (activeReports & 1) { if (inputKeyboard) { inputKeyboard->setValue(empty, 8); inputKeyboard->notify(); } }
+  if (activeReports & 2) { if (inputMouse) { inputMouse->setValue(empty, 4); inputMouse->notify(); } }
+  if (activeReports & 4) { if (inputConsumer) { inputConsumer->setValue(empty, 2); inputConsumer->notify(); } }
+  activeReports = 0;
+  Serial.println("[HID] release");
 }
 
 void stopHid(const char* reason) {
@@ -497,8 +534,13 @@ void stopHid(const char* reason) {
   }
 }
 
+// 追踪上次按下的键盘键，用于"按住"模型
+static uint8_t lastHidKey = 0;
+static uint8_t lastHidModifiers = 0;
+
 bool executeBinding(const Binding& b) {
-  if (hidRunning || !bleConnected) return false;
+  if (!bleConnected) return false;
+  if (irTxBusy()) return false;
   uint8_t required = b.type == kTypeMouse ? 2 : b.type == kTypeMedia ? 4 : 1;
   if (!(reportSubscriptions.load() & required)) {
     Serial.printf("[HID] report not subscribed: %u\n", required);
@@ -511,25 +553,37 @@ bool executeBinding(const Binding& b) {
     }
     macroStep = macroTextOffset = 0;
     macroRunning = true;
+  } else {
+    // 键盘/鼠标/媒体键：检查同键重复
+    bool sameKey = (hidRunning && !macroRunning && b.type == kTypeKeyboard &&
+                    b.key == lastHidKey && b.modifiers == lastHidModifiers);
+    if (sameKey) {
+      hidDeadline = millis() + 200;  // 按住 1s（macOS 自动重复需要长按）
+      Serial.printf("[HID] hold extend key=%u\n", b.key);
+      return true;
+    }
+  }
+  // 不同键或首次按下
+  if (hidRunning) {
+    if (macroRunning) return false;
+    stopHid("overwritten");
   }
   hidRunning = true;
   hidStarted = millis();
-  hidDeadline = millis();
+  hidDeadline = millis() + 200;
   hidNeedsRelease = b.type != kTypeMacro;
   switch (b.type) {
     case kTypeKeyboard:
+      lastHidKey = b.key;
+      lastHidModifiers = b.modifiers;
       sendRawKey(b.key, b.modifiers);
       break;
     case kTypeMouse:
-      if (b.mouseX || b.mouseY || b.mouseWheel) {
-        uint8_t mouseReport[4] = {0, (uint8_t)b.mouseX, (uint8_t)b.mouseY, (uint8_t)b.mouseWheel};
+      {
+        uint8_t mouseReport[4] = {b.mouseButton, (uint8_t)b.mouseX, (uint8_t)b.mouseY, (uint8_t)b.mouseWheel};
         inputMouse->setValue(mouseReport, 4);
         inputMouse->notify();
-      }
-      if (b.mouseButton) {
-        uint8_t mouseReport[4] = {b.mouseButton, 0, 0, 0};
-        inputMouse->setValue(mouseReport, 4);
-        inputMouse->notify();
+        activeReports |= 2;
       }
       break;
     case kTypeMedia:
@@ -537,6 +591,7 @@ bool executeBinding(const Binding& b) {
         uint8_t consumerReport[2] = {(uint8_t)(b.mediaCode & 0xFF), (uint8_t)(b.mediaCode >> 8)};
         inputConsumer->setValue(consumerReport, 2);
         inputConsumer->notify();
+        activeReports |= 4;
       }
       break;
   }
@@ -568,7 +623,7 @@ void tickHid() {
     sendRawKey(step["key"], step["modifiers"]);
     macroStep++;
     hidNeedsRelease = true;
-    hidDeadline = millis() + 50;
+    hidDeadline = millis() + 200;
   } else if (strcmp(kind, "text") == 0) {
     const char* text = step["text"];
     if (!text) { stopHid("bad-step"); return; }

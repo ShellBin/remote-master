@@ -151,7 +151,6 @@ function onDragEnd() {
       @dragend="onDragEnd"
     >
       <div class="step-drag" aria-label="拖拽排序">
-        <span class="step-drag-grip">⋮⋮</span>
         <select
           :value="step.kind"
           aria-label="步骤类型"
@@ -202,6 +201,7 @@ function onDragEnd() {
         </button>
       </div>
 
+      <div class="step-drag-grip">⋮⋮</div>
       <button type="button" class="danger" aria-label="删除步骤" @click="removeStep(index)">删除</button>
     </div>
 
@@ -213,6 +213,7 @@ function onDragEnd() {
     v-if="picker"
     :mode="picker.mode"
     :value="picker.mode === 'hid' ? modelValue[picker.stepIndex]?.key : modelValue[picker.stepIndex]?.keyId"
+    :modifiers="picker.mode === 'hid' ? (modelValue[picker.stepIndex]?.modifiers || 0) : 0"
     @select="onPickerSelect"
     @close="closePicker"
   />
@@ -220,7 +221,7 @@ function onDragEnd() {
 
 <style scoped>
 .step-drag{display:flex;align-items:center;gap:8px}
-.step-drag-grip{color:var(--muted);font-size:12px;cursor:grab;user-select:none;letter-spacing:1px}
+.step-drag-grip{color:var(--muted);font-size:16px;cursor:grab;user-select:none;letter-spacing:1px}
 .step.dragging{opacity:.4}
 .step.drag-over{border-color:var(--accent)}
 .step-key-btn{flex:1;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

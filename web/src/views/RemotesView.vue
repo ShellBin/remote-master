@@ -94,9 +94,9 @@ function validateImportFile(data) {
   if (!data || typeof data !== 'object') return '文件内容不是有效的 JSON 对象';
   if (data.format !== 'esp32-remote') return '文件格式不正确（缺少 format 字段）';
   if (!Array.isArray(data.remotes)) return '缺少 remotes 数组';
-  if (data.remotes.length !== 1) importError.value = '导入文件必须恰好包含 1 个遥控器';
-  if (!Array.isArray(data.keys)) importError.value = '缺少 keys 数组';
-  if (!data.captures || typeof data.captures !== 'object') importError.value = '缺少 captures 对象';
+  if (data.remotes.length !== 1) return '导入文件必须恰好包含 1 个遥控器';
+  if (!Array.isArray(data.keys)) return '缺少 keys 数组';
+  if (!data.captures || typeof data.captures !== 'object') return '缺少 captures 对象';
   return '';
 }
 
@@ -135,7 +135,7 @@ function onImportFileChange(event) {
   reader.readAsText(file);
 }
 
-// 提交导入：前端解析后逐键写入（flat 格式：proto/code 在按键顶层）
+// 提交导入：capture 去重上传 + 批量写入按键（固件单次落盘）
 async function submitImport() {
   if (!importData.value) {
     importError.value = '请先选择文件';
@@ -161,35 +161,51 @@ async function submitImport() {
   importError.value = '';
 
   try {
-    // 1. 先上传所有采样文件（captures 按 capturePath 索引）
-    for (let i = 0; i < keys.length; i++) {
-      const keyIn = keys[i];
+    // 1. 去重上传采样文件：相同 capturePath 只上传一次
+    const uploadedPaths = new Set();
+    const uniquePaths = [];
+    for (const keyIn of keys) {
       const capPath = keyIn.capturePath;
-      if (!capPath || !captures[capPath]) continue;
+      if (!capPath || !captures[capPath] || uploadedPaths.has(capPath)) continue;
+      uploadedPaths.add(capPath);
+      uniquePaths.push(capPath);
+    }
+    for (let i = 0; i < uniquePaths.length; i++) {
+      const capPath = uniquePaths[i];
+      importProgress.value = {done: i, total: uniquePaths.length + total, currentKey: `上传采样 ${i + 1}/${uniquePaths.length}`};
       const captureData = captures[capPath];
       const capContent = typeof captureData === 'string' ? captureData : JSON.stringify(captureData);
       const filename = capPath.split('/').pop();
       const fd = new FormData();
       fd.append('file', new Blob([capContent], {type: 'application/json'}), filename);
-      const res = await fetch(`/api/files?path=${encodeURIComponent(capPath)}`, {method: 'POST', body: fd});
-      if (!res.ok) throw new Error(`上传采样文件失败：${capPath}`);
-      await new Promise(r => setTimeout(r, 30));
+      const res = await fetch(`/api/files?path=${capPath}`, {method: 'POST', body: fd});
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        throw new Error(`上传采样文件失败：${capPath} (${res.status} ${errBody})`);
+      }
+      // 间隔200ms，给 ESP32 时间处理 WebSocket 心跳和其他任务
+      await new Promise(r => setTimeout(r, 200));
     }
 
     // 2. 创建遥控器（不带 ID，固件自动生成）
-    await catalog.save('remotes', {
+    await device.commandWithTimeout('remotes.save', {
       name: name,
       transport: data.remotes[0]?.transport || 'ir',
     });
-    await device.refresh();
+    // 主动请求最新 state，确保拿到固件生成的遥控器 ID
+    await device.commandWithTimeout('state.get', {}, 10000);
     const newRemote = catalog.remotes.find(r => r.name === name);
     if (!newRemote) throw new Error('创建遥控器失败');
     selectedRemoteId.value = newRemote.id;
 
-    // 3. 逐键写入
+    // 3. 逐键写入：每个按键等设备确认成功后再写下一个
     for (let i = 0; i < keys.length; i++) {
       const keyIn = keys[i];
-      importProgress.value = {done: i, total, currentKey: keyIn.name || keyIn.id};
+      importProgress.value = {
+        done: uniquePaths.length + i,
+        total: uniquePaths.length + total,
+        currentKey: keyIn.name || keyIn.id,
+      };
 
       const keyPayload = {
         name: keyIn.name || keyIn.id,
@@ -199,14 +215,14 @@ async function submitImport() {
       if (keyIn.code) keyPayload.code = keyIn.code;
       if (keyIn.capturePath) keyPayload.capturePath = keyIn.capturePath;
 
-      await catalog.save('keys', keyPayload);
-      await new Promise(r => setTimeout(r, 50));
+      await device.commandWithTimeout('keys.save', keyPayload);
     }
 
-    importProgress.value = {done: total, total, currentKey: ''};
+    importProgress.value = {done: uniquePaths.length + total, total: uniquePaths.length + total, currentKey: ''};
     device.setNotice(`遥控器「${name}」导入完成，共 ${total} 个按键`);
     closeModal();
   } catch (err) {
+    console.error('导入失败:', err);
     importError.value = err.message || '导入失败';
     importProgress.value = null;
   }
