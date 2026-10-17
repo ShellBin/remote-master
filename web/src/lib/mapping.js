@@ -2,7 +2,7 @@
 
 // 输出目标。红外发射需要先在设置页启用 GPIO4。
 export const TARGETS = [
-  {value: 'ble-hid', label: '蓝牙 HID（键盘 / 鼠标 / 媒体）'},
+  {value: 'ble-hid', label: '蓝牙 HID'},
   {value: 'ir-send', label: '红外发射'},
 ];
 
@@ -20,6 +20,23 @@ export const IR_ACTION_TYPES = [
   {value: 3, label: '红外按键序列（宏）'},
 ];
 
+// 统一的「目标 · 动作类型」组合下拉选项。
+// value 编码为 `${target}:${type}`，例如 'hid:0'、'ir:4'。
+export const MAPPING_ACTIONS = [
+  ...TARGETS.find(t => t.value === 'ble-hid')
+    ? ACTION_TYPES.map(a => ({value: `ble-hid:${a.value}`, label: `蓝牙 · ${a.label}`}))
+    : [],
+  ...TARGETS.find(t => t.value === 'ir-send')
+    ? IR_ACTION_TYPES.map(a => ({value: `ir-send:${a.value}`, label: `红外 · ${a.label}`}))
+    : [],
+];
+
+// 解析组合 value → {target, type}
+export function parseActionValue(value) {
+  const [target, type] = String(value).split(':');
+  return {target, type: Number(type)};
+}
+
 // 动作序列的步骤类型
 export const STEP_KINDS = [
   {value: 'key', label: '按键'},
@@ -36,7 +53,7 @@ export const MACRO_LIMITS = {
 };
 
 export const MACRO_HINTS = '最多 12 步、累计 512 个可打印 ASCII 字符、总时长 60 秒。'
-  + '红外序列只能包含“红外重放”和“等待”，需在设置页启用 GPIO4 发射；'
+  + '红外序列只能包含"红外重放"和"等待"，需在设置页启用 GPIO4 发射；'
   + '纯 HID 步骤的动作用于蓝牙映射。文本按美式键盘布局输出。';
 
 /** 判断一个动作序列是否只包含红外重放与等待步骤（可用于红外发射映射）。 */

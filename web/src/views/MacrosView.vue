@@ -225,21 +225,26 @@ async function submitImport() {
         <button class="secondary" @click="openImportModal">导入动作</button>
       </div>
       <p v-if="!catalog.macros.length" class="hint">尚无动作，请点击"新建动作"开始创建</p>
-      <div class="macro-list" v-else>
+      <div class="macro-grid" v-else>
         <div
           v-for="macro in catalog.macros"
           :key="macro.id"
-          class="macro-chip"
+          class="macro-card"
           :class="{active: macro.id === selectedId}"
           @click="selectMacro(macro)"
         >
-          <span class="macro-chip-name">{{ macro.name }}</span>
-          <span class="macro-chip-meta">{{ macro.steps.length }} 步</span>
-          <span class="macro-chip-actions">
+          <div class="macro-card-header">
+            <span class="macro-card-name">{{ macro.name }}</span>
+          </div>
+          <div class="macro-card-body">
+            <span class="macro-card-meta">{{ macro.steps.length }} 步</span>
+            <span class="macro-card-hint">{{ catalog.stepSummary(macro.steps[0]) }}{{ macro.steps.length > 1 ? ' …' : '' }}</span>
+          </div>
+          <div class="macro-card-actions">
             <button class="secondary" @click.stop="device.exportData('macro', macro.id, macro.name)">导出</button>
             <button class="secondary" @click.stop="testMacro(macro)">测试</button>
             <button class="danger" @click.stop="removeMacro(macro)">删除</button>
-          </span>
+          </div>
         </div>
       </div>
       <div class="actions" style="margin-top: 16px;">
@@ -315,14 +320,18 @@ async function submitImport() {
 </template>
 
 <style scoped>
-/* 动作列表 */
-.macro-list{display:grid;gap:10px;margin-top:12px}
-.macro-chip{display:flex;align-items:center;gap:12px;padding:12px 16px;background:#182437;border:1px solid var(--line);border-radius:10px;cursor:pointer;transition:border-color .15s,background .15s;flex-wrap:wrap}
-.macro-chip:hover{border-color:var(--accent)}
-.macro-chip.active{border-color:var(--accent);background:#1a2a42}
-.macro-chip-name{font-weight:500;color:var(--text)}
-.macro-chip-meta{font-size:13px;color:var(--muted)}
-.macro-chip-actions{display:flex;gap:6px;margin-left:auto}
+/* 动作卡片网格 */
+.macro-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:12px}
+.macro-card{background:#182437;border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;cursor:pointer;transition:border-color .15s,background .15s;overflow-wrap:anywhere}
+.macro-card:hover{border-color:var(--accent)}
+.macro-card.active{border-color:var(--accent);background:#1a2a42}
+.macro-card-header{display:flex;align-items:center}
+.macro-card-name{font-weight:500;color:var(--text);font-size:14px}
+.macro-card-body{flex:1;display:flex;flex-direction:column;gap:2px}
+.macro-card-meta{font-size:12px;color:var(--accent)}
+.macro-card-hint{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.macro-card-actions{display:flex;gap:6px;justify-content:flex-end}
+.macro-card-actions button{padding:5px 10px;font-size:12px}
 
 /* 编辑面板 */
 .macro-editor form{display:flex;flex-direction:column;gap:4px}
@@ -335,4 +344,8 @@ async function submitImport() {
 .remap-select{flex:1;font-size:13px;padding:6px 8px}
 
 .error-text{color:#ff6b6b;font-size:13px;margin:8px 0 0}
+
+@media (max-width:600px){
+  .macro-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+}
 </style>
