@@ -30,7 +30,38 @@ WebSocketsServer sockets(81);
 static void applyAccessPoint() {
   String ssid = remoteConfig["settings"]["apSsid"] | kApSsid;
   String password = remoteConfig["settings"]["apPassword"] | kApPassword;
-  WiFi.softAP(ssid.c_str(), password.c_str(), 6, false, 4);
+  // WPA2 密码最短 8 位：1~7 位的密码会让 softAP 静默失败（返回 false），
+  // 此时回退为开放热点并在串口给出明确提示，避免"搜得到却连不上"。
+  bool ok;
+  if (password.length() > 0 && password.length() < 8) {
+    Serial.printf("[WiFi] apPassword length %u < 8 is invalid; starting OPEN ap\n",
+                  (unsigned)password.length());
+    ok = WiFi.softAP(ssid.c_str(), nullptr, 6, false, 4);
+  } else {
+    ok = WiFi.softAP(ssid.c_str(), password.c_str(), 6, false, 4);
+  }
+  Serial.printf("[WiFi] AP %s: ssid=\"%s\" secured=%u ip=%s freeHeap=%lu\n",
+                ok ? "started" : "FAILED", ssid.c_str(),
+                password.length() >= 8 ? 1 : 0,
+                WiFi.softAPIP().toString().c_str(),
+                (unsigned long)ESP.getFreeHeap());
+}
+
+// WiFi 事件日志：客户端关联/离开/获址可见，断开原因码（如 15=四次握手
+// 超时）直接指示"连不上"的阶段。无输出说明客户端根本没摸到设备。
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_AP_START:
+      Serial.println("[WiFi] event: AP start"); break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+      Serial.printf("[WiFi] event: station joined aid=%u\n", info.wifi_ap_staconnected.aid); break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+      Serial.printf("[WiFi] event: station left aid=%u reason=%u\n",
+                    info.wifi_ap_stadisconnected.aid, info.wifi_ap_stadisconnected.reason); break;
+    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:
+      Serial.println("[WiFi] event: station got IP"); break;
+    default: break;
+  }
 }
 Binding bindings[kMaxBindings];
 uint8_t bindingCount = 0;
@@ -663,6 +694,7 @@ void setup() {
   irTxApplyMode(remoteConfig["settings"]["irTxMode"] | "off");
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
+  WiFi.onEvent(onWiFiEvent);
   applyAccessPoint();
   bleHidBegin();
   fileApiBegin(server);
@@ -716,6 +748,10 @@ void setup() {
 }
 
 void loop() {
+  // loop 分段计时遥测：单轮超过 150ms 时输出各环节耗时（ms），用于定位
+  // "按键后设备几秒无响应"这类阻塞问题。正常迭代 <5ms，遥测零噪音。
+  // 排查结束后此块可整体移除（标记 [LOOP]）。
+  uint32_t t0 = micros();
   // system.reset 的实际执行点：响应已在上一轮的 sockets.loop() 里发出，
   // 这里稍作延迟让 TCP 把回包推出去，再执行数秒级的格式化。
   if (pendingFactoryReset) {
@@ -730,17 +766,24 @@ void loop() {
     stateDirty = ok;  // 广播新状态（WS 多半已被格式化期间的停顿杀死，前端会重连）
   }
   irTxTick();
+  uint32_t tIrTx = micros();
   if (!irTxBusy() && IrReceiver.decode()) captureIrFrame();
+  uint32_t tIr = micros();
   tickBleHosts();
+  uint32_t tBle = micros();
   tickHid();
+  uint32_t tHid = micros();
   uint32_t now = millis();
   if (learningMode && static_cast<int32_t>(now - learningUntil) >= 0) {
     learningMode = false; learningRemote = ""; stateDirty = true;
   }
   digitalWrite(kLedPin, static_cast<int32_t>(ledUntil - now) > 0 && ((now / 60) & 1) ? LOW : HIGH);
   server.handleClient();
+  uint32_t tHttp = micros();
   sockets.loop();
+  uint32_t tWs = micros();
   tickKeepAlive();
+  uint32_t tKa = micros();
   static bool wasConnected = false, wasRunning = false, wasIrTxRunning = false;
   static String previousIrTxError;
   if (wasIrTxRunning != irTxBusy()) stateDirty = true;
@@ -778,5 +821,15 @@ void loop() {
   wasConnected = bleHidConnected(); wasRunning = hidRunning;
   hosts = remoteConfig["hosts"].size();
   if (stateDirty) { stateDirty = false; pushState(); }
+  uint32_t tEnd = micros();
+  uint32_t totalMs = (tEnd - t0) / 1000;
+  if (totalMs > 150) {
+    Serial.printf("[LOOP] slow %lums: irTx=%lu ir=%lu bleHosts=%lu hid=%lu http=%lu ws=%lu keepAlive=%lu state=%lu\n",
+                  (unsigned long)totalMs,
+                  (unsigned long)((tIrTx - t0) / 1000), (unsigned long)((tIr - tIrTx) / 1000),
+                  (unsigned long)((tBle - tIr) / 1000), (unsigned long)((tHid - tBle) / 1000),
+                  (unsigned long)((tHttp - tHid) / 1000), (unsigned long)((tWs - tHttp) / 1000),
+                  (unsigned long)((tKa - tWs) / 1000), (unsigned long)((tEnd - tKa) / 1000));
+  }
   delay(1);
 }

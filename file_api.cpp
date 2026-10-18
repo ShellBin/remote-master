@@ -39,10 +39,34 @@ static String uploadTarget, uploadError;
 static size_t uploadBytes = 0;
 static File uploadFile;
 
-// 上传写缓冲：攒够 4KB 再落盘，把"每个 TCP 分片一次 flash 事务"降为
-// "每 4KB 一次"，显著缩短 cache 关闭时长与 loop 占用。
-static uint8_t uploadBuf[4096];
+// 上传写缓冲：上传开始时动态申请 64KB（攒批落盘，把"每个 TCP 分片一次
+// flash 事务"降为"每 64KB 一次"），结束/中止即释放——不常驻占用堆，
+// 避免挤压 WiFi 驱动在客户端关联阶段的运行时分配（静态常驻 64KB 曾导致
+// AP 可搜到但关联不上）。申请失败回退到 8KB 静态兜底。
+static const size_t kUploadBufPreferred = 65536;
+static uint8_t uploadBufFallback[8192];
+static uint8_t* uploadBuf = nullptr;
+static size_t uploadBufSize = 0;
 static size_t uploadBufLen = 0;
+
+static void acquireUploadBuffer() {
+  uploadBufLen = 0;
+  uploadBuf = static_cast<uint8_t*>(malloc(kUploadBufPreferred));
+  if (uploadBuf) {
+    uploadBufSize = kUploadBufPreferred;
+  } else {
+    uploadBuf = uploadBufFallback;
+    uploadBufSize = sizeof(uploadBufFallback);
+    Serial.println("[FS] 64KB upload buffer alloc failed; using 8KB fallback");
+  }
+}
+
+static void releaseUploadBuffer() {
+  if (uploadBuf && uploadBuf != uploadBufFallback) free(uploadBuf);
+  uploadBuf = nullptr;
+  uploadBufSize = 0;
+  uploadBufLen = 0;
+}
 
 // ==================== FS 用量缓存 ====================
 
@@ -412,7 +436,7 @@ static void handleUpload(HTTPUpload& upload) {
   if (upload.status == UPLOAD_FILE_START) {
     uploadOk = false;
     uploadBytes = 0;
-    uploadBufLen = 0;
+    acquireUploadBuffer();
     uploadError = "";
     uploadFile = File();  // 释放上一次上传残留的句柄，避免误关旧文件
     uploadTarget = webServer->arg("path");
@@ -422,6 +446,7 @@ static void handleUpload(HTTPUpload& upload) {
     else if (freeBytes() < kMinFreeBytes) uploadError = "Not enough free space";
     if (!uploadError.isEmpty()) {
       Serial.printf("[FS] upload refused: %s (%s)\n", uploadError.c_str(), uploadTarget.c_str());
+      releaseUploadBuffer();
       return;
     }
     uploadFile = LittleFS.open(kUploadTemp, "w");
@@ -437,17 +462,18 @@ static void handleUpload(HTTPUpload& upload) {
       return;
     }
     // 写入目标先落到暂存文件，全部写完再改名，掉电不会留下半个资源文件。
-    // 先在 RAM 里攒 4KB，减少 flash 写事务次数（每次写都会关 cache、阻塞 ISR）。
+    // 先在 RAM 里攒满缓冲再落盘，减少 flash 写事务次数（每次写都会关
+    // cache、阻塞 ISR）。
     const uint8_t* data = upload.buf;
     size_t remaining = upload.currentSize;
     while (remaining) {
-      size_t room = sizeof(uploadBuf) - uploadBufLen;
+      size_t room = uploadBufSize - uploadBufLen;
       size_t chunk = remaining < room ? remaining : room;
       memcpy(uploadBuf + uploadBufLen, data, chunk);
       uploadBufLen += chunk;
       data += chunk;
       remaining -= chunk;
-      if (uploadBufLen == sizeof(uploadBuf) && !flushUploadBuffer()) {
+      if (uploadBufLen == uploadBufSize && !flushUploadBuffer()) {
         failUpload("Write failed (filesystem full?)", uploadBytes);
         return;
       }
@@ -459,7 +485,7 @@ static void handleUpload(HTTPUpload& upload) {
       uploadFile.flush();
       uploadFile.close();
     }
-    uploadBufLen = 0;
+    releaseUploadBuffer();
     if (uploadOk) {
       if (!ensureParentDirectories(uploadTarget)) {
         uploadOk = false;
@@ -477,7 +503,7 @@ static void handleUpload(HTTPUpload& upload) {
     uploadOk = false;
     uploadError = "Upload aborted";
     Serial.printf("[FS] upload aborted: %s\n", uploadTarget.c_str());
-    uploadBufLen = 0;
+    releaseUploadBuffer();
     if (uploadFile) uploadFile.close();
     LittleFS.remove(kUploadTemp);
     fsUsageRefresh(true);

@@ -33,8 +33,10 @@ void releaseHid();
 // 停止当前 HID 动作（含宏），释放所有按键
 void stopHid(const char* reason);
 
-// 执行绑定（键盘/鼠标/媒体/宏），返回 false 表示被拒绝
-bool executeBinding(const Binding& b);
+// 执行绑定（键盘/鼠标/媒体/宏），返回 false 表示被拒绝。
+// repeat=true 表示输入是红外协议的重复帧（长按延续），同键时只续按住时长，
+// 不产生新击键；repeat=false 的同键输入视为重新点击（先释放再按下）。
+bool executeBinding(const Binding& b, bool repeat = false);
 
 // loop() 中调用：逐步执行宏、处理释放/超时
 void tickHid();

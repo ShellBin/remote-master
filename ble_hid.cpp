@@ -505,7 +505,6 @@ void tickBleHosts() {
 
 // Fix: 空闲心跳，每 3 秒发送空报告防止 macOS 监管超时断连
 static uint32_t lastKeepAlive = 0;
-static bool keepAliveSent = false;
 void tickKeepAlive() {
   if (!bleConnected.load()) { lastKeepAlive = millis(); return; }
   if (hidRunning) { lastKeepAlive = millis(); return; }
@@ -521,22 +520,31 @@ void tickKeepAlive() {
 // 追踪上次发送的报告类型，避免 releaseHid 发送多余报告导致 BLE 阻塞
 static uint8_t activeReports = 0; // bit0=keyboard, bit1=mouse, bit2=consumer
 
+// notify 耗时遥测：正常情况下 setValue+notify 是毫秒内的非阻塞调用。
+// 若 BLE 栈 mbuf 耗尽或 ble_hs 锁被长操作持有，这里会阻塞 loop——
+// 超过 50ms 即输出耗时，用于定位"按键后设备几秒无响应"类问题。
 void sendRawKey(uint8_t key, uint8_t modifiers) {
   uint8_t report[8] = {modifiers, 0, key, 0, 0, 0, 0, 0};
+  uint32_t started = micros();
   inputKeyboard->setValue(report, sizeof(report));
   inputKeyboard->notify();
+  uint32_t elapsedUs = micros() - started;
   activeReports |= 1;
   Serial.printf("[HID] send key=%u mod=%u\n", key, modifiers);
+  if (elapsedUs > 50000) Serial.printf("[HID] SLOW notify(press): %lums\n", (unsigned long)(elapsedUs / 1000));
 }
 
 void releaseHid() {
   if (!bleConnected.load()) { activeReports = 0; return; }
   uint8_t empty[8] = {0};
+  uint32_t started = micros();
   if (activeReports & 1) { if (inputKeyboard) { inputKeyboard->setValue(empty, 8); inputKeyboard->notify(); } }
   if (activeReports & 2) { if (inputMouse) { inputMouse->setValue(empty, 4); inputMouse->notify(); } }
   if (activeReports & 4) { if (inputConsumer) { inputConsumer->setValue(empty, 2); inputConsumer->notify(); } }
+  uint32_t elapsedUs = micros() - started;
   activeReports = 0;
   Serial.println("[HID] release");
+  if (elapsedUs > 50000) Serial.printf("[HID] SLOW notify(release): %lums\n", (unsigned long)(elapsedUs / 1000));
 }
 
 void stopHid(const char* reason) {
@@ -553,16 +561,28 @@ void stopHid(const char* reason) {
 // 追踪上次按下的键盘键，用于"按住"模型
 static uint8_t lastHidKey = 0;
 static uint8_t lastHidModifiers = 0;
+static uint32_t lastKeyInputAt = 0;  // 上次同键输入到达的时刻（连击/长按判别用）
 
-bool executeBinding(const Binding& b) {
+// 按住窗口：NEC 家族 repeat 帧约 108ms 一帧，Sony 等协议长按会每 ~45ms
+// 重发完整帧。取 250ms 覆盖两者并容忍 loop 抖动；仍低于主机自动重复
+// 触发阈值（macOS ~500ms），单击不受影响。
+static const uint32_t kHoldWindowMs = 250;
+// 同键完整帧间隔低于该值视为长按重发（Sony ~45ms），而不是用户重新点击。
+// 人手连击很难稳定低于 120ms；NEC 家族长按走专用 repeat 帧，不受影响。
+static const uint32_t kRetriggerMinMs = 120;
+
+bool executeBinding(const Binding& b, bool repeat) {
   if (!bleConnected) return false;
-  if (irTxBusy()) return false;
+  // 注意：不检查 irTxBusy()。IR 发射走 RMT DMA，与 BLE notify 无共享资源，
+  // 交叉阻塞会让 ~90ms 的发射窗口吞掉 BLE 按键。
   uint8_t required = b.type == kTypeMouse ? 2 : b.type == kTypeMedia ? 4 : 1;
   if (!(reportSubscriptions.load() & required)) {
     Serial.printf("[HID] report not subscribed: %u\n", required);
     return false;
   }
+  uint32_t now = millis();
   if (b.type == kTypeMacro) {
+    if (hidRunning) return false;  // 宏不抢占进行中的动作
     if (deserializeJson(runningSteps, b.macro) ||
         !validMacro(runningSteps.as<JsonArrayConst>())) {
       runningSteps.clear(); return false;
@@ -570,30 +590,34 @@ bool executeBinding(const Binding& b) {
     macroStep = macroTextOffset = 0;
     macroRunning = true;
   } else {
-    // 键盘/鼠标/媒体键：检查同键重复（红外长按的重复帧约 110ms 一帧）。
-    // 按压窗口是 150ms（见下方 hidDeadline），重复帧在松开前到达即可续上，
-    // 主机看到的就是持续按住，macOS 自动重复才能生效。
+    // 键盘/鼠标/媒体键的同键重复分两种：
+    // 1) 长按延续：repeat 帧（NEC 家族）或间隔 <120ms 的同键完整帧
+    //    （Sony 等协议长按 = 高频重发完整帧）——只续按住时长，不发新击键；
+    // 2) 用户重新点击（间隔 >=120ms 的非重复输入）——先释放再按下，
+    //    主机才能注册第二次击键。此前所有同键输入都被当成情况 1 吞掉，
+    //    表现为"第一次快、第二次起全卡"。
     bool sameKey = (hidRunning && !macroRunning && b.type == kTypeKeyboard &&
                     b.key == lastHidKey && b.modifiers == lastHidModifiers);
-    if (sameKey) {
-      hidDeadline = millis() + 150;
-      Serial.printf("[HID] hold extend key=%u\n", b.key);
+    if (sameKey && (repeat || now - lastKeyInputAt < kRetriggerMinMs)) {
+      lastKeyInputAt = now;
+      hidDeadline = now + kHoldWindowMs;
       return true;
     }
   }
-  // 不同键或首次按下
+  // 新击键或首次按下：先释放进行中的按键（同键连击也在这里完成 release）。
   if (hidRunning) {
     if (macroRunning) return false;
     stopHid("overwritten");
   }
   hidRunning = true;
-  hidStarted = millis();
-  hidDeadline = millis() + 200;
+  hidStarted = now;
+  hidDeadline = now + kHoldWindowMs;
   hidNeedsRelease = b.type != kTypeMacro;
   switch (b.type) {
     case kTypeKeyboard:
       lastHidKey = b.key;
       lastHidModifiers = b.modifiers;
+      lastKeyInputAt = now;
       sendRawKey(b.key, b.modifiers);
       break;
     case kTypeMouse:
@@ -613,9 +637,8 @@ bool executeBinding(const Binding& b) {
       }
       break;
   }
-  // 按压 150ms 再松开：覆盖红外重复帧 ~110ms 的间隔，同键续帧（sameKey）
-  // 在松开前到达即可形成连续按住；单击场景下 150ms 对主机也无感。
-  if (hidNeedsRelease) hidDeadline = millis() + 150;
+  // hidDeadline 已在上面设为 kHoldWindowMs：repeat 帧/同键续帧在松开前
+  // 到达即可形成连续按住；单击时 250ms 的按住对主机无感。
   return true;
 }
 
@@ -627,6 +650,9 @@ void tickHid() {
   if (hidNeedsRelease) {
     releaseHid();
     hidNeedsRelease = false;
+    // 非宏按键 release 后立即完成：BLE notify 可靠有序，无需再留 20ms
+    // 尾巴。宏保留 20ms 步间隔，给主机留出处理 release 的时间。
+    if (!macroRunning) { stopHid("completed"); return; }
     hidDeadline = millis() + 20;
     return;
   }

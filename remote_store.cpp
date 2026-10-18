@@ -430,7 +430,8 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {
       if (type == 3) {
         JsonObject macro = findItem("macros", obj["macroId"].as<String>());
         if (macro.isNull()) { error = "Invalid mapping"; return false; }
-        for (JsonObjectConst step : macro["steps"].as<JsonArrayConst>())
+        JsonArrayConst steps = macro["steps"].as<JsonArrayConst>();
+        for (JsonObjectConst step : steps)
           if (strcmp(step["kind"] | "", "ir") == 0) {
             error = "Bluetooth macros cannot contain IR replay steps"; return false;
           }

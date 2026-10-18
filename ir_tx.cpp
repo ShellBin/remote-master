@@ -55,7 +55,18 @@ uint32_t defaultCarrier(const String& protocol) {
   return 38000;
 }
 
+// 帧缓存：连击/长按时同一键会高频触发 loadFrame，每次都打开采样文件并
+// 解析 JSON 会阻塞 loop 10~50ms。out（全局 frame）按 keyId + configRevision
+// 缓存，配置保存（含重新学习采样）后 revision 自增，缓存自动失效。
+String cachedFrameKeyId;
+uint32_t cachedFrameRevision = 0;
+
 bool loadFrame(const String& keyId, Frame& out, String& error) {
+  if (keyId == cachedFrameKeyId && cachedFrameRevision == configRevision &&
+      !out.symbols.empty()) {
+    return true;
+  }
+  cachedFrameKeyId = "";  // 加载失败时保持失效，避免半帧残留
   JsonObjectConst key;
   for (JsonObjectConst item : remoteConfig["keys"].as<JsonArrayConst>())
     if (item["id"].as<String>() == keyId) { key = item; break; }
@@ -125,6 +136,8 @@ bool loadFrame(const String& keyId, Frame& out, String& error) {
     append(static_cast<uint16_t>(duration), mark);
   }
   if (half & 1) append(1, false);
+  cachedFrameKeyId = keyId;
+  cachedFrameRevision = configRevision;
   return true;
 }
 
@@ -164,7 +177,9 @@ bool startFrame(String& error) {
 
 bool available(String& error) {
   if (mode == Mode::Off) error = "IR transmit is off; enable GPIO4 in settings";
-  else if (running || hidRunning) error = "An output action is already running";
+  // 只互斥进行中的 IR 动作。不再检查 hidRunning：BLE 报告走射频、IR 走
+  // RMT DMA，两者无共享资源，互斥只会让按住窗口吞掉 IR 触发。
+  else if (running) error = "An IR action is already running";
   else return true;
   return false;
 }
@@ -201,7 +216,8 @@ void irTxStop() {
   releaseChannel();
   sequence.clear();
   stepIndex = 0;
-  frame.symbols.clear();
+  // 注意：不清 frame.symbols——loadFrame 的帧缓存依赖它（按 keyId +
+  // configRevision 校验有效性，重新加载前会自行 clear）。
   if (running) irTxPauseReceiver(false);
   running = false;
 }
