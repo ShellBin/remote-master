@@ -2,6 +2,7 @@ import {computed, ref} from 'vue';
 import {defineStore} from 'pinia';
 import {httpBase, websocketUrl} from '@/lib/device-url';
 import {exportFilename} from '@/lib/mapping';
+import {t} from '@/i18n';
 
 const emptyConfig = () => ({
   remotes: [],
@@ -43,10 +44,10 @@ export const useDeviceStore = defineStore('device', () => {
   const ready = computed(() => connection.value === 'open');
 
   const connectionLabel = computed(() => ({
-    connecting: '正在连接',
-    open: 'WebSocket 已连接',
-    closed: '连接中断，正在重连',
-  }[connection.value] || '未知状态'));
+    connecting: t('status.connecting'),
+    open: t('status.connected'),
+    closed: t('status.disconnected'),
+  }[connection.value] || t('status.unknown')));
 
   function setNotice(text, level = 'info') {
     notice.value = {text: text || '', level};
@@ -59,13 +60,13 @@ export const useDeviceStore = defineStore('device', () => {
    */
   function command(op, args = {}) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error('设备未连接，请等待 WebSocket 重连'));
+      return Promise.reject(new Error(t('notice.deviceNotConnected')));
     }
     const id = ++sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error('设备响应超时，操作结果未知，请重连后检查'));
+        reject(new Error(t('notice.responseTimeout')));
       }, COMMAND_TIMEOUT_MS);
       pending.set(id, {resolve, reject, timer});
       socket.send(JSON.stringify({id, op, args}));
@@ -78,13 +79,13 @@ export const useDeviceStore = defineStore('device', () => {
    */
   async function commandWithTimeout(op, args = {}, timeoutMs = 15000) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error('设备未连接，请等待 WebSocket 重连'));
+      return Promise.reject(new Error(t('notice.deviceNotConnected')));
     }
     const id = ++sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error('设备响应超时，请检查设备状态后重试'));
+        reject(new Error(t('notice.responseTimeoutCheck')));
       }, timeoutMs);
       pending.set(id, {resolve, reject, timer});
       socket.send(JSON.stringify({id, op, args}));
@@ -104,7 +105,7 @@ export const useDeviceStore = defineStore('device', () => {
     try {
       data = JSON.parse(event.data);
     } catch (error) {
-      setNotice(`响应解析失败：${error.message}`, 'error');
+      setNotice(t('notice.parseFailed', error.message), 'error');
       return;
     }
 
@@ -125,11 +126,11 @@ export const useDeviceStore = defineStore('device', () => {
     if (data.event === 'capture.error') {
       lastInput.value = null;
       captureErrors.value += 1;
-      setNotice('红外采样缓冲区溢出，未保存完整数据，请重新学习', 'error');
+      setNotice(t('notice.captureOverflow'), 'error');
       return;
     }
     if (data.event === 'ir.error') {
-      setNotice(`红外发射失败：${data.error}`, 'error');
+      setNotice(t('notice.irTxFailed', data.error), 'error');
       return;
     }
 
@@ -182,7 +183,7 @@ export const useDeviceStore = defineStore('device', () => {
         };
         status.value = {...status.value, ...statusData};
       } catch (error) {
-        setNotice(`状态获取失败：${error.message}`, 'error');
+        setNotice(t('notice.statusFetchFailed', error.message), 'error');
       }
     })();
     try {
@@ -223,7 +224,7 @@ export const useDeviceStore = defineStore('device', () => {
       if (socket !== ws) return;
       socket = null;
       connection.value = 'closed';
-      failPending('连接中断，操作结果未知，请检查保存结果');
+      failPending(t('notice.connectionLost'));
       retryTimer = setTimeout(connect, RECONNECT_DELAY_MS);
     };
     ws.onerror = () => ws.close();

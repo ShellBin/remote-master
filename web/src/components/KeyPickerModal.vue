@@ -2,6 +2,7 @@
 import {computed, onBeforeUnmount, onMounted, ref} from 'vue';
 import {HID_KEY_GROUPS, MODIFIERS, keyboardCodeToHid} from '@/lib/hid';
 import {useCatalogStore} from '@/stores/catalog';
+import {t} from '@/i18n';
 
 // 按键选择模态框：支持 HID 键码和红外按键两种模式。
 // mode='hid' 时显示分组键码 + 修饰键多选 + 按键录入；
@@ -79,7 +80,7 @@ function onEsc(event) {
   <Teleport to="body">
     <div class="modal-backdrop" @click="onBackdropClick">
       <div class="modal kp-modal">
-        <h3>{{ mode === 'hid' ? '选择按键' : '选择红外按键' }}</h3>
+        <h3>{{ mode === 'hid' ? t('picker.selectKey') : t('picker.selectIrKey') }}</h3>
 
         <!-- HID 键码模式 -->
         <template v-if="mode === 'hid'">
@@ -99,7 +100,7 @@ function onEsc(event) {
           </div>
 
           <div class="kp-mods">
-            <span class="kp-mods-label">修饰键：</span>
+            <span class="kp-mods-label">{{ t('picker.modifiers') }}</span>
             <label v-for="mod in MODIFIERS" :key="mod.value" class="check">
               <input
                 type="checkbox"
@@ -112,7 +113,7 @@ function onEsc(event) {
 
         <!-- 红外按键模式 -->
         <template v-else>
-          <p v-if="!irGroups.length" class="hint">还没有可重放的红外按键，请先在遥控器下学习。</p>
+          <p v-if="!irGroups.length" class="hint">{{ t('picker.noIrKeys') }}</p>
           <div v-else class="kp-list">
             <div v-for="group in irGroups" :key="group.label" class="kp-group">
               <div class="kp-group-label">{{ group.label }}</div>
@@ -130,8 +131,8 @@ function onEsc(event) {
         </template>
 
         <div class="modal-actions">
-          <button v-if="mode === 'hid'" type="button" @click="save()">保存</button>
-          <button class="secondary" type="button" @click="emit('close')">取消</button>
+          <button v-if="mode === 'hid'" type="button" @click="save()">{{ t('picker.save') }}</button>
+          <button class="secondary" type="button" @click="emit('close')">{{ t('picker.cancel') }}</button>
         </div>
       </div>
     </div>

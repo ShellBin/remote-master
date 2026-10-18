@@ -6,6 +6,7 @@ import {useCatalogStore} from '@/stores/catalog';
 import {useDeviceStore} from '@/stores/device';
 import {createKeyHighlighter} from '@/lib/key-highlighter';
 import {irSendDisabledReason} from '@/lib/ir';
+import {t} from '@/i18n';
 
 const catalog = useCatalogStore();
 const device = useDeviceStore();
@@ -91,12 +92,12 @@ function openImportModal() {
 
 // 校验导入文件格式
 function validateImportFile(data) {
-  if (!data || typeof data !== 'object') return '文件内容不是有效的 JSON 对象';
-  if (data.format !== 'esp32-remote') return '文件格式不正确（缺少 format 字段）';
-  if (!Array.isArray(data.remotes)) return '缺少 remotes 数组';
-  if (data.remotes.length !== 1) return '导入文件必须恰好包含 1 个遥控器';
-  if (!Array.isArray(data.keys)) return '缺少 keys 数组';
-  if (!data.captures || typeof data.captures !== 'object') return '缺少 captures 对象';
+  if (!data || typeof data !== 'object') return t('remote.invalidJson');
+  if (data.format !== 'esp32-remote') return t('remote.invalidFormat');
+  if (!Array.isArray(data.remotes)) return t('remote.invalidFormat');
+  if (data.remotes.length !== 1) return t('remote.invalidFormat');
+  if (!Array.isArray(data.keys)) return t('remote.noKeysArray');
+  if (!data.captures || typeof data.captures !== 'object') return t('remote.noCaptures');
   return '';
 }
 
@@ -108,7 +109,7 @@ function onImportFileChange(event) {
   const file = event.target.files[0];
   if (!file) return;
   if (!file.name.endsWith('.json')) {
-    importError.value = '请选择 JSON 文件';
+    importError.value = t('remote.selectJson');
     return;
   }
   const reader = new FileReader();
@@ -121,34 +122,34 @@ function onImportFileChange(event) {
         return;
       }
       importData.value = data;
-      importName.value = data.remotes[0].name || '未命名遥控器';
+      importName.value = data.remotes[0].name || 'unnamed';
       // 检查是否重名
       const duplicate = catalog.remotes.find(r => r.name === importName.value);
       if (duplicate) {
-        importError.value = '已存在同名遥控器，请修改名称';
+        importError.value = t('remote.duplicateName');
       }
     } catch (parseErr) {
-      importError.value = 'JSON 解析失败：' + parseErr.message;
+      importError.value = t('remote.invalidJson');
     }
   };
-  reader.onerror = () => { importError.value = '文件读取失败'; };
+  reader.onerror = () => { importError.value = t('remote.fileRequired'); };
   reader.readAsText(file);
 }
 
 // 提交导入：capture 去重上传 + 批量写入按键（固件单次落盘）
 async function submitImport() {
   if (!importData.value) {
-    importError.value = '请先选择文件';
+    importError.value = t('remote.fileRequired');
     return;
   }
   const name = importName.value.trim();
   if (!name) {
-    importError.value = '请输入遥控器名称';
+    importError.value = t('remote.nameRequired');
     return;
   }
   const duplicate = catalog.remotes.find(r => r.name === name);
   if (duplicate) {
-    importError.value = '已存在同名遥控器';
+    importError.value = t('remote.duplicateName');
     return;
   }
 
@@ -172,7 +173,7 @@ async function submitImport() {
     }
     for (let i = 0; i < uniquePaths.length; i++) {
       const capPath = uniquePaths[i];
-      importProgress.value = {done: i, total: uniquePaths.length + total, currentKey: `上传采样 ${i + 1}/${uniquePaths.length}`};
+      importProgress.value = {done: i, total: uniquePaths.length + total, currentKey: `${t('remote.importingPrefix', i + 1, uniquePaths.length)}`};
       const captureData = captures[capPath];
       const capContent = typeof captureData === 'string' ? captureData : JSON.stringify(captureData);
       const filename = capPath.split('/').pop();
@@ -181,7 +182,7 @@ async function submitImport() {
       const res = await fetch(`/api/files?path=${capPath}`, {method: 'POST', body: fd});
       if (!res.ok) {
         const errBody = await res.text().catch(() => '');
-        throw new Error(`上传采样文件失败：${capPath} (${res.status} ${errBody})`);
+        throw new Error(`${t('remote.uploadSampleFailed')}: ${capPath} (${res.status} ${errBody})`);
       }
       // 间隔200ms，给 ESP32 时间处理 WebSocket 心跳和其他任务
       await new Promise(r => setTimeout(r, 200));
@@ -195,12 +196,10 @@ async function submitImport() {
     // 主动拉取一次配置，确保拿到固件生成的遥控器 ID
     await device.refresh();
     const newRemote = catalog.remotes.find(r => r.name === name);
-    if (!newRemote) throw new Error('创建遥控器失败');
+    if (!newRemote) throw new Error(t('remote.createFailed'));
     selectedRemoteId.value = newRemote.id;
 
     // 3. 批量写入按键：一条 WebSocket 命令完成全部验证与写入，固件只落盘一次。
-    // 逐键 keys.save 会让固件对每个键做全量配置序列化 + flash 擦写，
-    // 几十键的遥控器就是几十次全量写，导入期间设备假死、WS 心跳死亡。
     const batchKeys = keys.map(keyIn => {
       const keyPayload = {
         name: keyIn.name || keyIn.id,
@@ -215,18 +214,17 @@ async function submitImport() {
       importProgress.value = {
         done: uniquePaths.length,
         total: uniquePaths.length + total,
-        currentKey: `批量写入 ${batchKeys.length} 个按键…`,
+        currentKey: `${t('remote.batchWritePrefix', batchKeys.length)}`,
       };
-      // 批量保存包含逐键验证 + 一次落盘，大遥控器可能超过默认的 15s
       await device.commandWithTimeout('keys.batchSave', {keys: batchKeys}, 30000);
     }
 
     importProgress.value = {done: uniquePaths.length + total, total: uniquePaths.length + total, currentKey: ''};
-    device.setNotice(`遥控器「${name}」导入完成，共 ${total} 个按键`);
+    device.setNotice(t('remote.importDone', name, total));
     closeModal();
   } catch (err) {
-    console.error('导入失败:', err);
-    importError.value = err.message || '导入失败';
+    console.error('Import failed:', err);
+    importError.value = err.message || t('remote.importFailed');
     importProgress.value = null;
   }
 }
@@ -249,22 +247,19 @@ function resetKeyForm() {
   editingName.value = '';
 }
 
-// 收到信号：若选中遥控器有同码按键则高亮对应卡片（渐入渐出）；
+// 收到信号：若选中遥控器有同码按键则高亮对应卡片；
 // 学习模式下还会填充表单并进入"更新"模式。
 watch(() => device.lastInput, input => {
   if (!viewActive || !input || !selectedRemoteId.value) return;
 
-  // 仅在当前遥控器范围内查找匹配按键（避免多遥控共用码时混乱）
   const existing = catalog.keys.find(key => (
     key.remoteId === selectedRemoteId.value
       && key.proto === input.proto
       && key.code === input.code
   ));
 
-  // 高亮匹配到的按键卡片（学习与非学习模式均生效）
   if (existing?.id) keyHighlighter.flash(existing.id);
 
-  // 仅学习模式：填充表单并进入"更新"模式
   if (!device.status.learningRemote || device.status.learningRemote !== selectedRemoteId.value) return;
 
   Object.assign(keyForm, {
@@ -280,8 +275,8 @@ watch(() => device.lastInput, input => {
     key.proto === input.proto && key.code === input.code && key.remoteId !== selectedRemoteId.value
   ));
   device.setNotice(
-    `收到 ${input.proto} 按键，${input.pulseCount} 段原始脉冲，请命名后保存`
-      + (others.length ? `；注意该红外码还存在于其他 ${others.length} 个按键` : ''),
+    `${t('remote.received', input.proto, input.pulseCount)}`
+      + (others.length ? t('remote.alsoOnOthers', others.length) : ''),
   );
 }, {flush: 'sync'});
 
@@ -294,13 +289,13 @@ async function submitRemote() {
       transport: existing?.transport || remoteForm.transport || 'ir',
     });
     closeModal();
-  }, modalMode.value === 'rename' ? '遥控器已重命名' : '遥控器已保存');
+  }, modalMode.value === 'rename' ? t('remote.renamed') : t('remote.saved'));
 }
 
 async function submitKey() {
   await run(async () => {
     if (learnedRemote.value !== selectedRemoteId.value || !keyForm.proto || !keyForm.code) {
-      throw new Error('请先学习当前遥控器的信号');
+      throw new Error(t('remote.learnFirst'));
     }
     const payload = {
       id: keyForm.id,
@@ -312,18 +307,18 @@ async function submitKey() {
     if (captureId.value) payload.captureId = captureId.value;
     await catalog.save('keys', payload);
     resetKeyForm();
-  }, '按键已保存');
+  }, t('remote.keySaved'));
 }
 
 const startLearning = () => run(async () => {
-  if (!selectedRemoteId.value) throw new Error('请先选择遥控器');
+  if (!selectedRemoteId.value) throw new Error(t('remote.selectFirst'));
   await catalog.startLearning(selectedRemoteId.value);
-}, '已开始学习，请按实体遥控器按键');
+}, t('remote.learnStarted'));
 
 const stopLearning = () => run(async () => {
   await catalog.stopLearning();
   resetKeyForm();
-}, '已停止学习');
+}, t('remote.learnStopped'));
 
 function editKey(key) {
   selectedRemoteId.value = key.remoteId;
@@ -333,8 +328,8 @@ function editKey(key) {
 }
 
 async function removeRemote(remote) {
-  if (!confirm(`确定删除遥控器「${remote.name}」？需要先删除它下面的所有按键。`)) return;
-  await run(() => catalog.remove('remotes', remote.id), '遥控器已删除');
+  if (!confirm(t('remote.confirmDelete', remote.name))) return;
+  await run(() => catalog.remove('remotes', remote.id), t('remote.deleted'));
   if (selectedRemoteId.value === remote.id) {
     if (learningHere.value) await catalog.stopLearning();
     selectedRemoteId.value = '';
@@ -343,14 +338,14 @@ async function removeRemote(remote) {
 }
 
 async function removeKey(key) {
-  if (!confirm(`确定删除按键「${key.name}」？引用它的映射需要先删除。`)) return;
-  await run(() => catalog.remove('keys', key.id), '按键已删除');
+  if (!confirm(t('remote.confirmDeleteKey', key.name))) return;
+  await run(() => catalog.remove('keys', key.id), t('remote.keyDeleted'));
 }
 
 const sendDisabledReason = key => irSendDisabledReason(
   key, catalog.settings, device.status, device.ready,
 );
-const sendKey = key => run(() => catalog.sendKey(key.id), `已开始发射「${key.name}」`);
+const sendKey = key => run(() => catalog.sendKey(key.id), t('remote.transmitting', key.name));
 
 // 开始重命名按键
 function startRename(key) {
@@ -375,7 +370,7 @@ async function commitRename(key) {
       capturePath: key.capturePath,
     });
     editingKeyId.value = null;
-  }, '按键名称已更新');
+  }, t('remote.keyNameUpdated'));
 }
 </script>
 
@@ -383,12 +378,12 @@ async function commitRename(key) {
   <section>
     <!-- 已定义遥控器 -->
     <article>
-      <h2>已定义遥控器</h2>
+      <h2>{{ t('remote.defined') }}</h2>
       <div class="actions" style="margin-bottom: 12px;">
-        <button @click="openCreateModal">添加遥控器</button>
-        <button class="secondary" @click="openImportModal">导入遥控器</button>
+        <button @click="openCreateModal">{{ t('remote.add') }}</button>
+        <button class="secondary" @click="openImportModal">{{ t('remote.import') }}</button>
       </div>
-      <p v-if="!catalog.remotes.length" class="hint">尚无遥控器，请点击"添加遥控器"或"导入遥控器"</p>
+      <p v-if="!catalog.remotes.length" class="hint">{{ t('remote.empty') }}</p>
       <div class="remote-list" v-else>
         <div
           v-for="remote in catalog.remotes"
@@ -399,12 +394,12 @@ async function commitRename(key) {
         >
           <span class="remote-chip-name">{{ remote.name }}</span>
           <span class="remote-chip-meta">
-            {{ remote.transport === 'ir' ? '红外' : '蓝牙' }} · {{ catalog.keysOfRemote(remote.id).length }} 键
+            {{ remote.transport === 'ir' ? t('remote.ir') : t('remote.bluetooth') }} · {{ t('remote.keys', catalog.keysOfRemote(remote.id).length) }}
           </span>
           <span class="remote-chip-actions">
-            <button class="secondary" @click.stop="device.exportData('remote', remote.id, remote.name)">导出</button>
-            <button class="secondary" @click.stop="openRenameModal(remote)">重命名</button>
-            <button class="danger" @click.stop="removeRemote(remote)">删除</button>
+            <button class="secondary" @click.stop="device.exportData('remote', remote.id, remote.name)">{{ t('remote.export') }}</button>
+            <button class="secondary" @click.stop="openRenameModal(remote)">{{ t('remote.rename') }}</button>
+            <button class="danger" @click.stop="removeRemote(remote)">{{ t('remote.delete') }}</button>
           </span>
         </div>
       </div>
@@ -412,36 +407,36 @@ async function commitRename(key) {
 
     <!-- 遥控器按键学习 -->
     <article>
-      <h2>遥控器按键学习</h2>
+      <h2>{{ t('remote.learning') }}</h2>
 
       <div class="remote-selector">
         <select :value="selectedRemoteId" @change="selectRemote($event.target.value)" class="remote-select">
-          <option value="">请选择遥控器</option>
+          <option value="">{{ t('remote.select') }}</option>
           <option v-for="remote in catalog.remotes" :key="remote.id" :value="remote.id">
-            {{ remote.name }}（{{ catalog.keysOfRemote(remote.id).length }} 键）
+            {{ remote.name }}（{{ t('remote.keys', catalog.keysOfRemote(remote.id).length) }}）
           </option>
         </select>
       </div>
 
       <div v-if="selectedRemoteId" class="learning-section">
         <div class="actions">
-          <button v-if="!learningHere" :disabled="busy" @click="startLearning">开始学习</button>
-          <button v-if="learningHere" class="secondary" :disabled="busy" @click="stopLearning">停止学习</button>
+          <button v-if="!learningHere" :disabled="busy" @click="startLearning">{{ t('remote.startLearn') }}</button>
+          <button v-if="learningHere" class="secondary" :disabled="busy" @click="stopLearning">{{ t('remote.stopLearn') }}</button>
         </div>
         <p v-if="!['push-pull', 'sink'].includes(catalog.settings.irTxMode)" class="hint">
-          红外发射已关闭，请在设置页面选择 GPIO4 驱动模式后使用发射按钮。
+          {{ t('remote.txDisabled') }}
         </p>
 
         <form v-if="learningHere" @submit.prevent="submitKey">
           <div class="key-form-row">
-            <label>按键名称
-              <input v-model="keyForm.name" required maxlength="63" placeholder="例如：音量增加">
+            <label>{{ t('remote.keyName') }}
+              <input v-model="keyForm.name" required maxlength="63" :placeholder="t('remote.keyNamePlaceholder')">
             </label>
-            <button :disabled="busy">保存按键</button>
+            <button :disabled="busy">{{ t('remote.saveKey') }}</button>
           </div>
           <div class="fields">
-            <span class="field-text">协议：{{ keyForm.proto || '等待遥控输入' }}</span>
-            <span class="field-text">红外码：{{ keyForm.code || '—' }}</span>
+            <span class="field-text">{{ t('remote.protocol', keyForm.proto || t('remote.protocolWaiting')) }}</span>
+            <span class="field-text">{{ t('remote.irCode', keyForm.code || '—') }}</span>
           </div>
         </form>
 
@@ -470,7 +465,7 @@ async function commitRename(key) {
               <span
                 class="badge"
                 :class="{ok: catalog.mappingOf(key.id)}"
-              >{{ catalog.mappingOf(key.id) ? '已映射' : '未映射' }}</span>
+              >{{ catalog.mappingOf(key.id) ? t('remote.mapped') : t('remote.unmapped') }}</span>
             </div>
             <div class="key-card-body">
               <span class="key-proto">{{ key.proto }}</span>
@@ -480,18 +475,18 @@ async function commitRename(key) {
               <button
                 class="secondary"
                 :disabled="busy || !!sendDisabledReason(key)"
-                :title="sendDisabledReason(key) || '发射已保存的红外信号'"
+                :title="sendDisabledReason(key) || t('remote.transmit')"
                 @click="sendKey(key)"
-              >发射</button>
-              <button class="danger" :disabled="busy" @click="removeKey(key)">删除</button>
+              >{{ t('remote.transmit') }}</button>
+              <button class="danger" :disabled="busy" @click="removeKey(key)">{{ t('remote.delete') }}</button>
             </div>
-            <p v-if="!key.capturePath" class="key-hint">缺少原始脉冲，请重新学习</p>
+            <p v-if="!key.capturePath" class="key-hint">{{ t('remote.missingCapture') }}</p>
           </div>
         </div>
-        <p v-if="!keysHere.length" class="hint">该遥控器尚无按键，开始学习后按实体遥控器按键</p>
+        <p v-if="!keysHere.length" class="hint">{{ t('remote.noKeys') }}</p>
       </div>
 
-      <p v-else class="hint">请先选择一个遥控器</p>
+      <p v-else class="hint">{{ t('remote.selectFirst') }}</p>
     </article>
 
     <!-- 模态框：添加/重命名/导入遥控器 -->
@@ -500,46 +495,46 @@ async function commitRename(key) {
         <div class="modal">
           <!-- 添加/重命名模式 -->
           <template v-if="modalMode !== 'import'">
-            <h3>{{ modalMode === 'rename' ? '重命名遥控器' : '添加遥控器' }}</h3>
+            <h3>{{ modalMode === 'rename' ? t('remote.rename') : t('remote.add') }}</h3>
             <form @submit.prevent="submitRemote">
-              <label>遥控器名称
-                <input v-model="remoteForm.name" required maxlength="63" placeholder="例如：客厅遥控器" autofocus>
+              <label>{{ t('remote.name') }}
+                <input v-model="remoteForm.name" required maxlength="63" :placeholder="t('remote.namePlaceholder')" autofocus>
               </label>
-              <label v-if="modalMode === 'create'">输入方式
+              <label v-if="modalMode === 'create'">{{ t('remote.inputMethod') }}
                 <select v-model="remoteForm.transport">
-                  <option value="ir">红外遥控器</option>
+                  <option value="ir">{{ t('remote.ir') }}</option>
                 </select>
               </label>
               <div class="modal-actions">
-                <button :disabled="busy" type="submit">{{ modalMode === 'rename' ? '保存' : '添加' }}</button>
-                <button class="secondary" type="button" @click="closeModal">取消</button>
+                <button :disabled="busy" type="submit">{{ modalMode === 'rename' ? t('remote.save') : t('remote.addBtn') }}</button>
+                <button class="secondary" type="button" @click="closeModal">{{ t('remote.cancel') }}</button>
               </div>
             </form>
           </template>
           <!-- 导入模式 -->
           <template v-else>
-            <h3>导入遥控器</h3>
+            <h3>{{ t('remote.importTitle') }}</h3>
             <!-- 进度显示 -->
             <div v-if="importProgress" class="import-progress">
-              <p class="hint">正在导入… {{ importProgress.done }}/{{ importProgress.total }}</p>
+              <p class="hint">{{ t('remote.importing', importProgress.done, importProgress.total) }}</p>
               <p v-if="importProgress.currentKey" class="current-key">{{ importProgress.currentKey }}</p>
               <div class="progress-bar"><i :style="{width: (importProgress.total ? (importProgress.done / importProgress.total * 100) : 0) + '%'}"></i></div>
             </div>
             <!-- 配置表单 -->
             <form v-else @submit.prevent="submitImport">
-              <label>选择文件
+              <label>{{ t('remote.selectFile') }}
                 <input id="import-file-input" type="file" accept=".json" @change="onImportFileChange">
               </label>
               <p v-if="importData" class="hint">
-                包含 {{ importData.keys?.length || 0 }} 个按键，{{ Object.keys(importData.captures || {}).length }} 个采样
+                {{ t('remote.containsKeys', importData.keys?.length || 0, Object.keys(importData.captures || {}).length) }}
               </p>
-              <label v-if="importData">遥控器名称
-                <input v-model="importName" required maxlength="63" placeholder="遥控器名称" :class="{error: importError}">
+              <label v-if="importData">{{ t('remote.name') }}
+                <input v-model="importName" required maxlength="63" :placeholder="t('remote.name')" :class="{error: importError}">
               </label>
               <p v-if="importError" class="error-text">{{ importError }}</p>
               <div class="modal-actions">
-                <button :disabled="busy || !importData || !!importError" type="submit">导入</button>
-                <button class="secondary" type="button" @click="closeModal">取消</button>
+                <button :disabled="busy || !importData || !!importError" type="submit">{{ t('remote.importBtn') }}</button>
+                <button class="secondary" type="button" @click="closeModal">{{ t('remote.cancel') }}</button>
               </div>
             </form>
           </template>

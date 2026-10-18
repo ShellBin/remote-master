@@ -3,6 +3,7 @@ import {defineStore} from 'pinia';
 import {useDeviceStore} from './device';
 import {hidKeyLabel, mediaLabel} from '@/lib/hid';
 import {isIrOnlyMacro} from '@/lib/mapping';
+import {t} from '@/i18n';
 
 /**
  * 配置数据层：把 device.config 这棵扁平 JSON 变成视图需要的形状，
@@ -28,7 +29,7 @@ export const useCatalogStore = defineStore('catalog', () => {
 
   // ---------- 查询 ----------
   const remoteById = id => remotes.value.find(remote => remote.id === id);
-  const remoteName = id => remoteById(id)?.name || '未知遥控器';
+  const remoteName = id => remoteById(id)?.name || t('catalog.unknownRemote');
   const keyById = id => keys.value.find(key => key.id === id);
   const hostName = address => (device.config.hosts || []).find(host => host.address === address)?.name || address || '';
   const mappingOf = keyId => mappings.value.find(mapping => mapping.keyId === keyId);
@@ -49,32 +50,31 @@ export const useCatalogStore = defineStore('catalog', () => {
     if (mapping.target === 'ir-send') {
       if (mapping.type === 4) {
         const key = keyById(mapping.outKeyId);
-        return `红外重放 · ${key ? `${remoteName(key.remoteId)} / ${key.name}` : '按键缺失'}`;
+        return t('catalog.irReplay', key ? `${remoteName(key.remoteId)} / ${key.name}` : t('catalog.missingKey'));
       }
       const macro = macros.value.find(item => item.id === mapping.macroId);
-      return `红外序列 · ${macro ? macro.name : '宏缺失'}`;
+      return t('catalog.irSequence', macro ? macro.name : t('catalog.missingMacro'));
     }
     if (mapping.type === 0) {
-      const modifiers = mapping.modifiers ? ` + 修饰 ${mapping.modifiers}` : '';
-      return `键盘 · ${hidKeyLabel(mapping.key)}${modifiers}`;
+      const modText = mapping.modifiers ? ' + ' + String(mapping.modifiers) : '';
+      return t('catalog.keyboard', hidKeyLabel(mapping.key)) + modText;
     }
     if (mapping.type === 1) {
-      return `鼠标 · 按钮 ${mapping.mouseButton || 0} / X ${mapping.mouseX || 0}`
-        + ` / Y ${mapping.mouseY || 0} / 滚轮 ${mapping.mouseWheel || 0}`;
+      return t('catalog.mouse', mapping.mouseButton || 0, mapping.mouseX || 0, mapping.mouseY || 0, mapping.mouseWheel || 0);
     }
-    if (mapping.type === 2) return `媒体 · ${mediaLabel(mapping.mediaCode)}`;
+    if (mapping.type === 2) return t('catalog.media', mediaLabel(mapping.mediaCode));
     const macro = macros.value.find(item => item.id === mapping.macroId);
-    return `宏 · ${macro ? macro.name : '宏缺失'}`;
+    return t('catalog.macro', macro ? macro.name : t('catalog.missingMacro'));
   }
 
   function stepSummary(step) {
-    if (step.kind === 'wait') return `等待 ${step.ms}ms`;
-    if (step.kind === 'text') return step.text || '（空文本）';
+    if (step.kind === 'wait') return t('catalog.wait', step.ms);
+    if (step.kind === 'text') return step.text || t('catalog.emptyText');
     if (step.kind === 'ir') {
       const key = keyById(step.keyId);
-      return `红外重放 ${key ? `${remoteName(key.remoteId)}/${key.name}` : '缺失按键'}`;
+      return t('catalog.irReplayStep', key ? `${remoteName(key.remoteId)}/${key.name}` : t('catalog.missingKey'));
     }
-    return `键码 ${step.key} / 修饰 ${step.modifiers}`;
+    return t('catalog.keyModStep', step.key, step.modifiers);
   }
 
   // ---------- 写操作 ----------

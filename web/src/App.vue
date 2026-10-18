@@ -1,17 +1,18 @@
 <script setup>
-import {onMounted} from 'vue';
+import {computed, onMounted} from 'vue';
 import {useRouter} from 'vue-router';
 import {useDeviceStore} from '@/stores/device';
+import {t} from '@/i18n';
 import StatusChips from '@/components/StatusChips.vue';
 import NoticeBar from '@/components/NoticeBar.vue';
 
 const device = useDeviceStore();
 const router = useRouter();
 
-// 导航项从路由表推导：新增带 meta.label 的路由会自动出现在这里。
-const tabs = router.options.routes
-  .filter(route => route.meta?.label)
-  .map(route => ({name: route.name, label: route.meta.label}));
+// 导航项从路由表推导：新增带 meta.labelKey 的路由会自动出现在这里。
+const tabs = computed(() => router.options.routes
+  .filter(route => route.meta?.labelKey)
+  .map(route => ({name: route.name, label: t(route.meta.labelKey)})));
 
 onMounted(() => device.connect());
 </script>
@@ -20,13 +21,13 @@ onMounted(() => device.connect());
   <main>
     <header>
       <div>
-        <small>ESP32-C3 BLE/IR 多功能遥控平台</small>
+        <small>{{ t('app.subtitle') }}</small>
         <h1>Remote Master</h1>
       </div>
     </header>
 
     <!-- 状态指示器顺序：蓝牙、WebSocket、存储 -->
-    <div class="chips status-bar" role="status" aria-label="设备状态">
+    <div class="chips status-bar" role="status" :aria-label="t('app.status')">
       <StatusChips />
       <span class="chip connection">{{ device.connectionLabel }}</span>
     </div>

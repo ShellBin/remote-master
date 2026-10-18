@@ -3,6 +3,7 @@ import {ref} from 'vue';
 import {hidKeyLabel, MODIFIERS} from '@/lib/hid';
 import {MACRO_LIMITS, STEP_KINDS} from '@/lib/mapping';
 import {useCatalogStore} from '@/stores/catalog';
+import {t} from '@/i18n';
 import KeyPickerModal from '@/components/KeyPickerModal.vue';
 
 const props = defineProps({
@@ -77,7 +78,7 @@ function changeKind(index, kind) {
 
 function addStep() {
   if (props.modelValue.length >= MACRO_LIMITS.maxSteps) {
-    emit('limit', `最多 ${MACRO_LIMITS.maxSteps} 个步骤`);
+    emit('limit', t('step.maxSteps', MACRO_LIMITS.maxSteps));
     return;
   }
   emit('update:modelValue', [...props.modelValue, defaultStep('key')]);
@@ -90,7 +91,7 @@ function removeStep(index) {
 // 红外按键显示文本
 function irKeyText(keyId) {
   const key = catalog.keyById(keyId);
-  if (!key) return '（缺失按键）';
+  if (!key) return t('step.missingKey');
   return `${catalog.remoteName(key.remoteId)} / ${key.name}`;
 }
 
@@ -150,10 +151,10 @@ function onDragEnd() {
       @drop="onDrop($event, index)"
       @dragend="onDragEnd"
     >
-      <div class="step-drag" aria-label="拖拽排序">
+      <div class="step-drag" :aria-label="t('step.dragSort')">
         <select
           :value="step.kind"
-          aria-label="步骤类型"
+          :aria-label="t('step.dragSort')"
           @change="changeKind(index, $event.target.value)"
           @click.stop
         >
@@ -164,7 +165,7 @@ function onDragEnd() {
       <div class="step-body">
         <template v-if="step.kind === 'key'">
           <button type="button" class="secondary step-key-btn" @click="openKeyPicker(index)">
-            {{ hidKeyLabel(step.key) || '选择按键' }}{{ modText(step.modifiers) }}
+            {{ hidKeyLabel(step.key) || t('step.selectKey') }}{{ modText(step.modifiers) }}
           </button>
           <div class="mod-row">
             <label v-for="mod in MODIFIERS" :key="mod.value" class="check">
@@ -180,9 +181,9 @@ function onDragEnd() {
         <input
           v-else-if="step.kind === 'text'"
           :value="step.text"
-          aria-label="ASCII 文本"
+          :aria-label="t('step.textPlaceholder')"
           maxlength="512"
-          placeholder="要输入的文本"
+          :placeholder="t('step.textPlaceholder')"
           @input="patch(index, {text: $event.target.value})"
         >
 
@@ -192,7 +193,7 @@ function onDragEnd() {
           type="number"
           min="0"
           max="30000"
-          aria-label="等待毫秒"
+          :aria-label="t('step.wait')"
           @input="patch(index, {ms: Number($event.target.value)})"
         >
 
@@ -202,11 +203,11 @@ function onDragEnd() {
       </div>
 
       <div class="step-drag-grip">⋮⋮</div>
-      <button type="button" class="danger" aria-label="删除步骤" @click="removeStep(index)">删除</button>
+      <button type="button" class="danger" :aria-label="t('step.delete')" @click="removeStep(index)">{{ t('step.delete') }}</button>
     </div>
 
-    <p v-if="!modelValue.length" class="hint">尚未添加步骤，动作序列至少需要一步才能保存。</p>
-    <button type="button" class="secondary" @click="addStep">增加步骤</button>
+    <p v-if="!modelValue.length" class="hint">{{ t('step.noSteps') }}</p>
+    <button type="button" class="secondary" @click="addStep">{{ t('step.add') }}</button>
   </div>
 
   <KeyPickerModal

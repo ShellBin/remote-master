@@ -5,6 +5,7 @@ import {useCatalogStore} from '@/stores/catalog';
 import {useDeviceStore} from '@/stores/device';
 import HostCard from '@/components/HostCard.vue';
 import StorageBar from '@/components/StorageBar.vue';
+import {t} from '@/i18n';
 
 const catalog = useCatalogStore();
 const device = useDeviceStore();
@@ -21,87 +22,53 @@ function syncFromSettings(settings) {
   form.irTxMode = settings.irTxMode || 'off';
 }
 
-// 状态推送会频繁到来，但用户正在输入时不回填，否则光标会被抢走。
 watch(() => catalog.settings, settings => {
   if (formEl.value?.contains(document.activeElement)) return;
   syncFromSettings(settings);
 }, {immediate: true, deep: true});
 
-
-
-// 蓝牙断开原因映射（HCI 错误码 → 中文）
+// Disconnect reason labels (HCI error codes)
 const disconnectReasons = {
+  0x00: 'Normal',
+  0x10: 'Remote user terminated',
+  0x11: 'Remote device terminated (resources)',
+  0x12: 'Remote device terminated (power off)',
+  0x13: 'Local host terminated',
+  0x22: 'Encryption mode unacceptable',
+  0x29: 'Host terminated (user request)',
+};
+
+const disconnectReasonsZh = {
   0x00: '正常断开',
-  0x01: '未知 HCI 命令',
-  0x02: '未知连接标识',
-  0x03: '硬件故障',
-  0x04: '页面超时',
-  0x05: '认证失败',
-  0x06: 'PIN 或密钥缺失',
-  0x07: '连接超时',
-  0x08: '连接数量已达上限',
-  0x09: ' SCO 连接数量已达上限',
-  0x0A: 'ACL 连接已存在',
-  0x0B: '命令不允许',
-  0x0C: '连接被拒绝（资源不足）',
-  0x0D: '连接被拒绝（安全原因）',
-  0x0E: '连接被拒绝（不可接受）',
-  0x0F: '不支持的参数',
   0x10: '远端用户终止连接',
   0x11: '远端设备终止连接（资源不足）',
   0x12: '远端设备终止连接（电源关闭）',
   0x13: '本地主机终止连接',
-  0x14: '重复认证',
-  0x15: '不允许配对',
-  0x16: '未知 LMP PDU',
-  0x17: '不支持的远端特性',
-  0x18: 'SCO 偏移被拒绝',
-  0x19: 'SCO 间隔被拒绝',
-  0x1A: 'SCO 模式被拒绝',
-  0x1B: 'LMP 参数无效',
-  0x1C: '未指定错误',
-  0x1D: '不支持的 LMP 参数',
-  0x1E: '角色变更不允许',
-  0x1F: 'LMP 响应超时',
-  0x20: 'LMP 碰撞',
-  0x21: 'LMP PDU 不允许',
   0x22: '加密模式不可接受',
-  0x23: '链路密钥不可更改',
-  0x24: '请求的 QoS 不支持',
-  0x25: '即时已过',
-  0x26: '配对与密钥交换不支持',
-  0x27: 'LMP 事务碰撞',
-  0x28: '保留槽不允许',
   0x29: '主机终止（用户请求）',
-  0x2A: '主机终止（资源不足）',
-  0x2B: '主机终止（超时）',
-  0x2C: '主机终止（连接超时）',
-  0x2D: '主机终止（连接失败）',
-  0x2E: '简单配对不支持',
-  0x2F: '主机处于简单配对模式',
-  0x30: '主机终止（认证失败）',
-  0x31: '主机终止（加密失败）',
 };
 
 const bleStatus = computed(() => {
   const ble = device.status.ble || {};
   const subscriptions = ble.reportSubscriptions || 0;
   const reports = [
-    subscriptions & 1 ? '键盘' : '',
-    subscriptions & 2 ? '鼠标' : '',
-    subscriptions & 4 ? '媒体' : '',
+    subscriptions & 1 ? 'Keyboard' : '',
+    subscriptions & 2 ? 'Mouse' : '',
+    subscriptions & 4 ? 'Media' : '',
   ].filter(Boolean);
 
+  const locale = localStorage.getItem('locale') || 'zh';
+  const reasons = locale === 'zh' ? disconnectReasonsZh : disconnectReasons;
   const disconnectCode = ble.lastDisconnectReason || 0;
   const disconnectHex = `0x${disconnectCode.toString(16).toUpperCase().padStart(2, '0')}`;
 
   return [
-    {label: '广播状态', value: ble.advertising ? '进行中' : '已停止', ok: ble.advertising},
-    {label: '链路连接', value: ble.linkConnected ? '已连接' : '未连接', ok: ble.linkConnected},
-    {label: '加密状态', value: ble.connected ? '已完成' : '未完成', ok: ble.connected},
-    {label: '报告订阅', value: reports.length ? reports.join('、') : '无', ok: reports.length > 0},
-    {label: '配对主机数', value: ble.bondCount ?? 0, ok: (ble.bondCount ?? 0) > 0},
-    {label: '断开原因', value: disconnectReasons[disconnectCode] || `${disconnectHex}（未知）`, ok: disconnectCode === 0},
+    {label: t('system.advertising'), value: ble.advertising ? t('system.advertising') : t('system.advertisingStopped'), ok: ble.advertising},
+    {label: t('system.connected'), value: ble.linkConnected ? t('system.connected') : t('system.disconnected'), ok: ble.linkConnected},
+    {label: t('system.encryptedDone'), value: ble.connected ? t('system.encryptedDone') : t('system.encryptedPending'), ok: ble.connected},
+    {label: t('system.reportSubscribed'), value: reports.length ? reports.join(', ') : '—', ok: reports.length > 0},
+    {label: t('system.bondCount', '0'), value: ble.bondCount ?? 0, ok: (ble.bondCount ?? 0) > 0},
+    {label: t('system.disconnectReasonPrefix'), value: reasons[disconnectCode] || `${disconnectHex}`, ok: disconnectCode === 0},
   ];
 });
 
@@ -113,13 +80,11 @@ async function submitWifiSettings() {
     };
     const current = catalog.settings;
     const apChanged = payload.apSsid !== current.apSsid || payload.apPassword !== current.apPassword;
-    if (apChanged && !confirm(
-      '热点名称或密码将变更，设备会重启热点并断开当前连接，需要重新连接 WiFi。是否继续？',
-    )) {
-      throw new Error('已取消，设置未保存');
+    if (apChanged && !confirm(t('system.apChangeConfirm'))) {
+      throw new Error(t('system.apChangeCancelled'));
     }
     await catalog.saveSettings(payload);
-  }, '热点设置已保存');
+  }, t('system.wifiSaved'));
 }
 
 async function submitBleSettings() {
@@ -128,7 +93,7 @@ async function submitBleSettings() {
       bleName: form.bleName.trim(),
     };
     await catalog.saveSettings(payload);
-  }, '蓝牙设置已保存');
+  }, t('system.bleNameSaved'));
 }
 
 async function submitIrSettings() {
@@ -138,23 +103,21 @@ async function submitIrSettings() {
       irTxMode: form.irTxMode,
     };
     await catalog.saveSettings(payload);
-  }, '红外设置已保存');
+  }, t('system.irTxSaved'));
 }
 
 function pairHost() {
-  if (device.status.ble?.linkConnected && !confirm('添加新主机会断开当前蓝牙连接，是否继续？')) return;
-  run(() => catalog.pairHost(), '已开放配对窗口');
+  if (device.status.ble?.linkConnected && !confirm(t('system.pairingDisconnect'))) return;
+  run(() => catalog.pairHost(), t('system.pairingOpened'));
 }
 
-const saveHost = (host, payload) => run(() => catalog.save('hosts', {id: host.id, ...payload}), '主机名称已保存');
+const saveHost = (host, payload) => run(() => catalog.save('hosts', {id: host.id, ...payload}), t('system.saved'));
 
 async function forgetHost(host) {
-  if (!confirm('忘记主机并删除配对密钥？')) return;
-  await run(() => catalog.remove('hosts', host.id), '已忘记主机');
+  if (!confirm(t('system.forgetHost') + '?')) return;
+  await run(() => catalog.remove('hosts', host.id), t('system.forgotten'));
 }
 
-// 设备侧当前保存的配对密钥地址。老固件没有该字段时为 null，按"已配对"处理，
-// 避免升级前误报。
 const bondedDevices = computed(() => (
   Array.isArray(device.status.ble?.bonds) ? device.status.ble.bonds : null
 ));
@@ -166,49 +129,47 @@ const isHostBonded = host => !bondedDevices.value || bondedDevices.value.some(
 const connectHost = host => run(
   () => catalog.reconnectToHost(host.id),
   isHostBonded(host)
-    ? `正在尝试连接 ${host.address}`
+    ? `${t('system.tryConnect')} ${host.address}`
     : `设备没有 ${host.name || host.address} 的配对密钥，已开放 2 分钟配对窗口；请在电脑蓝牙设置中重新连接该设备`,
 );
 
 async function resetSystem() {
-  if (!confirm('恢复初始状态将格式化整个文件系统（含前端页面），并清除所有已配对蓝牙设备，不可撤销。是否继续？')) return;
+  if (!confirm(t('system.resetConfirm'))) return;
   await run(async () => {
     await catalog.systemReset();
-  }, '重置已开始：设备正在格式化文件系统，此页面将断开，完成后请重新部署前端');
+  }, t('system.resetStarted'));
 }
 </script>
 
 <template>
   <section ref="formEl">
-    <!-- 无线网 -->
+    <!-- Wi-Fi -->
     <article>
-      <h2>Wi-Fi</h2>
+      <h2>{{ t('system.wifi') }}</h2>
       <form @submit.prevent="submitWifiSettings">
-        <h3>热点设置</h3>
+        <h3>{{ t('system.bleHotspot') }}</h3>
         <div class="fields">
-          <label>热点名称<input v-model="form.apSsid" maxlength="31" required></label>
-          <label>热点密码（留空为开放热点，或 8-63 位）<input v-model="form.apPassword" maxlength="63" autocomplete="off"></label>
+          <label>{{ t('system.ssid') }}<input v-model="form.apSsid" maxlength="31" required></label>
+          <label>{{ t('system.password') }} ({{ t('system.openNetwork') }} / {{ t('system.passwordHint') }})<input v-model="form.apPassword" maxlength="63" autocomplete="off"></label>
         </div>
         <div class="actions">
-          <button :disabled="busy">保存热点设置</button>
+          <button :disabled="busy">{{ t('system.saveWifi') }}</button>
         </div>
       </form>
-
-
     </article>
 
-    <!-- 蓝牙 -->
+    <!-- Bluetooth -->
     <article>
-      <h2>蓝牙</h2>
+      <h2>{{ t('system.bluetooth') }}</h2>
       <form @submit.prevent="submitBleSettings">
-        <h3>蓝牙设置</h3>
-        <label>蓝牙设备名称（1-29 字节）<input v-model="form.bleName" maxlength="29" required></label>
+        <h3>{{ t('system.bleSettings') }}</h3>
+        <label>{{ t('system.bleName') }}<input v-model="form.bleName" maxlength="29" required></label>
         <div class="actions">
-          <button :disabled="busy">保存蓝牙设置</button>
+          <button :disabled="busy">{{ t('system.saveBleName') }}</button>
         </div>
       </form>
 
-      <h3>蓝牙状态</h3>
+      <h3>{{ t('system.bleStatus') }}</h3>
       <div class="ble-status">
         <div v-for="item in bleStatus" :key="item.label" class="ble-status-item">
           <span class="ble-status-label">{{ item.label }}</span>
@@ -216,9 +177,9 @@ async function resetSystem() {
         </div>
       </div>
 
-      <h3>蓝牙主机</h3>
+      <h3>{{ t('system.bleHost') }}</h3>
       <div class="actions">
-        <button :disabled="busy" @click="pairHost">添加新主机（断开当前连接）</button>
+        <button :disabled="busy" @click="pairHost">{{ t('system.addNewHost') }}</button>
       </div>
 
       <HostCard
@@ -231,43 +192,43 @@ async function resetSystem() {
         @remove="forgetHost(host)"
         @connect="connectHost(host)"
       />
-      <p v-if="!catalog.hosts.length" class="hint">尚无配对主机，请开放配对并在电脑上连接。</p>
+      <p v-if="!catalog.hosts.length" class="hint">{{ t('system.noHosts') }}</p>
     </article>
 
-    <!-- 红外 -->
+    <!-- IR -->
     <article>
-      <h2>红外</h2>
+      <h2>{{ t('system.irTxTitle') }}</h2>
       <form @submit.prevent="submitIrSettings">
-        <h3>红外发射（GPIO4）</h3>
-        <label>发射管驱动模式
+        <h3>{{ t('system.irTx') }}</h3>
+        <label>{{ t('system.driveMode') }}
           <select v-model="form.irTxMode">
-            <option value="off">关闭（高阻）</option>
-            <option value="push-pull">推挽（高电平有效）</option>
-            <option value="sink">灌电流（低电平有效）</option>
+            <option value="off">{{ t('system.offHigh-Z') }}</option>
+            <option value="push-pull">{{ t('system.pushPull') }}</option>
+            <option value="sink">{{ t('system.sink') }}</option>
           </select>
         </label>
-        <p class="hint">默认关闭。推挽模式空闲为低电平；灌电流模式使用开漏输出，空闲释放引脚。请按接线选择模式，发射管必须限流，勿将 GPIO4 接到高于 3.3V 的电压。</p>
-        <p class="hint">保存后立即生效并中止当前红外动作。采样未记录载波时使用协议常用频率，未知协议默认 38 kHz。</p>
-        <h3>红外接收信号过滤</h3>
-        <label>忽略脉冲数少于 n 的红外信号（0 为不过滤）
+        <p class="hint">{{ t('system.irTxHint') }}</p>
+        <p class="hint">{{ t('system.irTxHint2') }}</p>
+        <h3>{{ t('system.irRxFilter') }}</h3>
+        <label>{{ t('system.minPulses') }}
           <input v-model.number="form.minPulses" type="number" min="0" max="750" required>
         </label>
         <div class="actions">
-          <button :disabled="busy">保存红外设置</button>
+          <button :disabled="busy">{{ t('system.saveIrSettings') }}</button>
         </div>
       </form>
     </article>
 
-    <!-- 存储 -->
+    <!-- Storage -->
     <article>
-      <h2>存储</h2>
+      <h2>{{ t('system.storage') }}</h2>
       <StorageBar />
 
-      <h3>初始化</h3>
+      <h3>{{ t('system.factoryResetTitle') }}</h3>
       <div class="actions">
-        <button class="danger" :disabled="busy" @click="resetSystem">清除配置和数据</button>
+        <button class="danger" :disabled="busy" @click="resetSystem">{{ t('system.factoryReset') }}</button>
       </div>
-      <p class="hint">此操作会从设备中移除管理前端、所有蓝牙配对和全部配置项，且不可撤销。</p>
+      <p class="hint">{{ t('system.resetHint') }}</p>
     </article>
   </section>
 </template>

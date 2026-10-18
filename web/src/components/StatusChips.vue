@@ -2,6 +2,7 @@
 import {computed} from 'vue';
 import {useDeviceStore} from '@/stores/device';
 import {useCatalogStore} from '@/stores/catalog';
+import {t} from '@/i18n';
 
 const device = useDeviceStore();
 const catalog = useCatalogStore();
@@ -12,27 +13,27 @@ const bleChip = computed(() => {
   const info = ble.value;
   if (info.connected) {
     const hostName = catalog.hostName(info.host) || info.host || '主机';
-    return {text: `蓝牙已加密连接 · ${hostName}`, tone: 'ok'};
+    return {text: t('status.bleEncrypted', hostName), tone: 'ok'};
   }
   if (info.tryingHost) {
     const hostName = catalog.hostName(info.tryingHost) || tryingHost;
-    return {text: `蓝牙正在尝试连接 · ${hostName}`, tone: ''};
+    return {text: t('status.bleConnecting', hostName), tone: ''};
   }
-  if (info.pairingAlwaysOpen) return {text: '蓝牙配对开放（尚无主机）', tone: ''};
-  if (info.pairing) return {text: '蓝牙新主机配对窗口开放中', tone: ''};
-  if (info.advertising) return {text: '蓝牙广播中（等待上次连接的主机）', tone: ''};
-  return {text: '蓝牙未广播', tone: ''};
+  if (info.pairingAlwaysOpen) return {text: t('status.blePairingOpen'), tone: ''};
+  if (info.pairing) return {text: t('status.bleNewHost'), tone: ''};
+  if (info.advertising) return {text: t('status.bleAdvertising'), tone: ''};
+  return {text: t('status.bleNotAdvertising'), tone: ''};
 });
 
 const learningText = computed(() => (
-  device.status.learningRemote ? `学习中 · ${catalog.remoteName(device.status.learningRemote)}` : ''
+  device.status.learningRemote ? t('status.learning', catalog.remoteName(device.status.learningRemote)) : ''
 ));
 
 const storageChip = computed(() => {
   const total = device.status.fsTotal || 0;
   const used = device.status.fsUsed || 0;
-  if (!total) return {text: '存储不可用', tone: 'danger'};
-  return {text: `剩余存储 ${Math.round((total - used) / 1024)} KB`, tone: ''};
+  if (!total) return {text: t('status.storageUnavailable'), tone: 'danger'};
+  return {text: t('status.storageFree', Math.round((total - used) / 1024)), tone: ''};
 });
 </script>
 

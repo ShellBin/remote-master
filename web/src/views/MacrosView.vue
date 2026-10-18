@@ -4,6 +4,7 @@ import {useAction} from '@/composables/useAction';
 import {useCatalogStore} from '@/stores/catalog';
 import {useDeviceStore} from '@/stores/device';
 import StepEditor from '@/components/StepEditor.vue';
+import {t} from '@/i18n';
 
 const catalog = useCatalogStore();
 const device = useDeviceStore();
@@ -15,10 +16,9 @@ const form = reactive({id: '', name: ''});
 const steps = ref([]);
 
 // ---------- 导入状态 ----------
-const importData = ref(null); // 解析后的导入数据
+const importData = ref(null);
 const importError = ref('');
 const importModalOpen = ref(false);
-// 缺失的红外按键映射：{原keyId: {name, options, selected}}
 const missingKeyRemap = ref({});
 
 function selectMacro(macro) {
@@ -52,20 +52,20 @@ function newMacro() {
 
 async function submit() {
   await run(async () => {
-    if (!steps.value.length) throw new Error('动作序列至少需要一个步骤');
+    if (!steps.value.length) throw new Error(t('macro.needsOneStep'));
     await catalog.save('macros', {id: form.id, name: form.name.trim(), steps: steps.value});
     resetForm();
-  }, '动作序列已保存');
+  }, t('macro.saved_ok'));
 }
 
 async function removeMacro(macro) {
-  if (!confirm(`确定删除动作「${macro.name}」？引用它的映射需要先删除。`)) return;
-  await run(() => catalog.remove('macros', macro.id), '动作已删除');
+  if (!confirm(t('macro.confirmDelete', macro.name))) return;
+  await run(() => catalog.remove('macros', macro.id), t('macro.deleted'));
   if (selectedId.value === macro.id) resetForm();
 }
 
-const testMacro = macro => run(() => catalog.test('macros', macro.id), '已下发执行指令');
-const stopHid = () => run(() => catalog.stopHid(), '已请求中止当前动作');
+const testMacro = macro => run(() => catalog.test('macros', macro.id), t('macro.commandSent'));
+const stopHid = () => run(() => catalog.stopHid(), t('macro.abortRequested'));
 
 // ---------- 导入 ----------
 function openImportModal() {
@@ -85,9 +85,9 @@ function closeImportModal() {
 }
 
 function validateImport(data) {
-  if (!data || typeof data !== 'object') return '文件内容不是有效的 JSON 对象';
-  if (data.format !== 'esp32-remote') return '文件格式不正确（缺少 format 字段）';
-  if (!Array.isArray(data.macros)) return '缺少 macros 数组';
+  if (!data || typeof data !== 'object') return t('remote.invalidJson');
+  if (data.format !== 'esp32-remote') return t('remote.invalidFormat');
+  if (!Array.isArray(data.macros)) return t('macro.missingMacrosArray');
   return '';
 }
 
@@ -98,7 +98,7 @@ function onImportFileChange(event) {
   const file = event.target.files[0];
   if (!file) return;
   if (!file.name.endsWith('.json')) {
-    importError.value = '请选择 JSON 文件';
+    importError.value = t('remote.selectJson');
     return;
   }
   const reader = new FileReader();
@@ -113,14 +113,13 @@ function onImportFileChange(event) {
       importData.value = data;
       analyzeMissingKeys(data);
     } catch (parseErr) {
-      importError.value = 'JSON 解析失败：' + parseErr.message;
+      importError.value = t('remote.invalidJson');
     }
   };
-  reader.onerror = () => { importError.value = '文件读取失败'; };
+  reader.onerror = () => { importError.value = t('remote.fileRequired'); };
   reader.readAsText(file);
 }
 
-// 分析导入的宏中哪些红外 keyId 在当前配置中不存在
 function analyzeMissingKeys(data) {
   const remap = {};
   const allKeys = new Set(catalog.keys.map(k => k.id));
@@ -140,7 +139,6 @@ function analyzeMissingKeys(data) {
   missingKeyRemap.value = remap;
 }
 
-// 尝试从导入数据的 keys 里找回原始名称
 function findOriginalKeyName(data, keyId) {
   if (!Array.isArray(data.keys)) return null;
   const key = data.keys.find(k => k.id === keyId);
@@ -153,7 +151,6 @@ const allRemapped = computed(() => (
   && Object.values(missingKeyRemap.value).every(v => v.selected)
 ));
 
-// 可用的红外按键选项（用于重新映射）
 const remapOptions = computed(() => {
   const opts = [];
   for (const remote of catalog.remotes) {
@@ -167,17 +164,16 @@ const remapOptions = computed(() => {
 
 async function submitImport() {
   if (!importData.value) {
-    importError.value = '请先选择文件';
+    importError.value = t('remote.fileRequired');
     return;
   }
   if (hasMissingKeys.value && !allRemapped.value) {
-    importError.value = '请为所有缺失的红外按键选择替换目标';
+    importError.value = t('macro.remapAllKeys');
     return;
   }
 
   await run(async () => {
     const data = importData.value;
-    // 构建 keyId 映射表
     const keyIdMap = {};
     for (const [oldId, info] of Object.entries(missingKeyRemap.value)) {
       if (info.selected) keyIdMap[oldId] = info.selected;
@@ -189,16 +185,15 @@ async function submitImport() {
         if (step.kind === 'ir' && step.keyId && keyIdMap[step.keyId]) {
           return {...step, keyId: keyIdMap[step.keyId]};
         }
-        // 若原 keyId 仍然存在，保留；否则且无映射则删除该步骤
         if (step.kind === 'ir' && step.keyId && !catalog.keyById(step.keyId) && !keyIdMap[step.keyId]) {
           return null;
         }
         return step;
       }).filter(Boolean);
 
-      if (!newSteps.length) continue; // 跳过无有效步骤的宏
+      if (!newSteps.length) continue;
 
-      const name = macro.name || '未命名动作';
+      const name = macro.name || 'unnamed';
       const existing = catalog.macros.find(m => m.name === name);
       await catalog.save('macros', {
         ...(existing ? {id: existing.id} : {}),
@@ -208,10 +203,10 @@ async function submitImport() {
       imported++;
     }
 
-    device.setNotice(`导入完成，共 ${imported} 个动作序列`);
+    device.setNotice(t('macro.importDone', imported));
     closeImportModal();
     await device.refresh();
-  }, '导入失败');
+  }, t('remote.importFailed'));
 }
 </script>
 
@@ -219,12 +214,12 @@ async function submitImport() {
   <section>
     <!-- 已保存的动作 -->
     <article>
-      <h2>已保存的动作</h2>
+      <h2>{{ t('macro.saved') }}</h2>
       <div class="actions" style="margin-bottom: 12px;">
-        <button @click="newMacro">新建动作</button>
-        <button class="secondary" @click="openImportModal">导入动作</button>
+        <button @click="newMacro">{{ t('macro.new') }}</button>
+        <button class="secondary" @click="openImportModal">{{ t('macro.import') }}</button>
       </div>
-      <p v-if="!catalog.macros.length" class="hint">尚无动作，请点击"新建动作"开始创建</p>
+      <p v-if="!catalog.macros.length" class="hint">{{ t('macro.empty') }}</p>
       <div class="macro-grid" v-else>
         <div
           v-for="macro in catalog.macros"
@@ -237,28 +232,28 @@ async function submitImport() {
             <span class="macro-card-name">{{ macro.name }}</span>
           </div>
           <div class="macro-card-body">
-            <span class="macro-card-meta">{{ macro.steps.length }} 步</span>
+            <span class="macro-card-meta">{{ t('macro.steps', macro.steps.length) }}</span>
             <span class="macro-card-hint">{{ catalog.stepSummary(macro.steps[0]) }}{{ macro.steps.length > 1 ? ' …' : '' }}</span>
           </div>
           <div class="macro-card-actions">
-            <button class="secondary" @click.stop="device.exportData('macro', macro.id, macro.name)">导出</button>
-            <button class="secondary" @click.stop="testMacro(macro)">测试</button>
-            <button class="danger" @click.stop="removeMacro(macro)">删除</button>
+            <button class="secondary" @click.stop="device.exportData('macro', macro.id, macro.name)">{{ t('macro.export') }}</button>
+            <button class="secondary" @click.stop="testMacro(macro)">{{ t('macro.test') }}</button>
+            <button class="danger" @click.stop="removeMacro(macro)">{{ t('macro.delete') }}</button>
           </div>
         </div>
       </div>
       <div class="actions" style="margin-top: 16px;">
-        <button class="danger" :disabled="busy" @click="stopHid">中止当前动作</button>
+        <button class="danger" :disabled="busy" @click="stopHid">{{ t('macro.abort') }}</button>
       </div>
     </article>
 
     <!-- 编辑动作序列 -->
     <article class="macro-editor">
-      <h2>编辑动作序列</h2>
+      <h2>{{ t('macro.edit') }}</h2>
 
       <form v-if="selectedId || creating" @submit.prevent="submit">
-        <label>名称
-          <input v-model="form.name" required maxlength="63" placeholder="例如：打开搜索并输入">
+        <label>{{ t('macro.name') }}
+          <input v-model="form.name" required maxlength="63" :placeholder="t('macro.namePlaceholder')">
         </label>
 
         <StepEditor
@@ -268,39 +263,39 @@ async function submitImport() {
         />
 
         <div class="actions">
-          <button :disabled="busy">{{ selectedId ? '更新动作' : '保存动作' }}</button>
-          <button type="button" class="secondary" :disabled="busy" @click="newMacro">清空</button>
+          <button :disabled="busy">{{ selectedId ? t('macro.update') : t('macro.save') }}</button>
+          <button type="button" class="secondary" :disabled="busy" @click="newMacro">{{ t('macro.clear') }}</button>
         </div>
       </form>
 
-      <p v-else class="hint">请从上方选择一个动作进行编辑，或点击"新建动作"开始创建</p>
+      <p v-else class="hint">{{ t('macro.selectHint') }}</p>
     </article>
 
     <!-- 导入模态框 -->
     <Teleport to="body">
       <div v-if="importModalOpen" class="modal-backdrop" @click.self="closeImportModal">
         <div class="modal">
-          <h3>导入动作序列</h3>
+          <h3>{{ t('macro.importTitle') }}</h3>
           <form @submit.prevent="submitImport">
-            <label>选择文件
+            <label>{{ t('remote.selectFile') }}
               <input id="macro-import-file" type="file" accept=".json" @change="onImportFileChange">
             </label>
             <p v-if="importData" class="hint">
-              包含 {{ importData.macros?.length || 0 }} 个动作序列
+              {{ t('macro.contains', importData.macros?.length || 0) }}
             </p>
 
             <!-- 缺失红外按键重映射 -->
             <div v-if="hasMissingKeys" class="remap-section">
-              <h4>以下导入的红外按键在当前配置中不存在，请选择替换目标</h4>
+              <h4>{{ t('macro.missingKeysTitle') }}</h4>
               <div v-for="(info, oldId) in missingKeyRemap" :key="oldId" class="remap-row">
                 <span class="remap-original">{{ info.name }}</span>
                 <select v-model="info.selected" class="remap-select">
-                  <option value="">请选择…</option>
+                  <option value="">{{ t('macro.selectPlaceholder') }}</option>
                   <option v-for="opt in remapOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
                 </select>
               </div>
               <p v-if="!remapOptions.length" class="error-text">
-                当前没有可重放的红外按键，请先学习遥控器后再导入。
+                {{ t('macro.noReplayableKeys') }}
               </p>
             </div>
 
@@ -309,8 +304,8 @@ async function submitImport() {
               <button
                 type="submit"
                 :disabled="busy || !importData || !!importError || (hasMissingKeys && (!allRemapped || !remapOptions.length))"
-              >导入</button>
-              <button class="secondary" type="button" @click="closeImportModal">取消</button>
+              >{{ t('macro.import') }}</button>
+              <button class="secondary" type="button" @click="closeImportModal">{{ t('macro.cancel') }}</button>
             </div>
           </form>
         </div>
