@@ -9,7 +9,7 @@ import {isIrOnlyMacro} from '@/lib/mapping';
  * 并把"写设备"的操作收敛成具名方法，视图不再直接拼 op 字符串。
  *
  * 配置结构（remote-config.json）：
- *   remotes  → 数据源（红外；蓝牙为预留）
+ *   remotes  → 数据源（红外）
  *   keys     → 挂在遥控器下的按键，带完整原始脉冲
  *   mappings → 按键 → 输出目标（ble-hid / ir-send）
  *   macros   → 动作序列（蓝牙 HID 序列 / 红外序列共用一套步骤模型）

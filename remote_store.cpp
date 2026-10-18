@@ -370,9 +370,8 @@ bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {
     error = "Name must be 1-63 bytes"; return false;
   }
   if (collection == "remotes") {
-    // BLE central input is reserved, not advertised as implemented.
     if (strcmp(obj["transport"] | "", "ir") != 0) {
-      error = "BLE remote input is reserved for a future transport adapter"; return false;
+      error = "Only IR remotes are supported"; return false;
     }
     obj["device"] = "";
   } else if (collection == "keys") {

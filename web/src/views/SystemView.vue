@@ -170,8 +170,6 @@ const connectHost = host => run(
     : `设备没有 ${host.name || host.address} 的配对密钥，已开放 2 分钟配对窗口；请在电脑蓝牙设置中重新连接该设备`,
 );
 
-const exportData = scope => run(() => device.exportData(scope), '数据已导出');
-
 async function resetSystem() {
   if (!confirm('恢复初始状态将格式化整个文件系统（含前端页面），并清除所有已配对蓝牙设备，不可撤销。是否继续？')) return;
   await run(async () => {
@@ -265,16 +263,11 @@ async function resetSystem() {
       <h2>存储</h2>
       <StorageBar />
 
-      <h3>数据导出</h3>
-      <div class="actions">
-        <button class="secondary" :disabled="busy" @click="exportData('macros')">导出动作序列</button>
-      </div>
-      <p class="hint">单个遥控器的导出请在「遥控器管理」页面操作</p>
-
       <h3>初始化</h3>
       <div class="actions">
         <button class="danger" :disabled="busy" @click="resetSystem">清除配置和数据</button>
       </div>
+      <p class="hint">此操作会从设备中移除管理前端、所有蓝牙配对和全部配置项，且不可撤销。</p>
     </article>
   </section>
 </template>

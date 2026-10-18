@@ -508,7 +508,6 @@ async function commitRename(key) {
               <label v-if="modalMode === 'create'">输入方式
                 <select v-model="remoteForm.transport">
                   <option value="ir">红外遥控器</option>
-                  <option disabled>蓝牙遥控器（预留）</option>
                 </select>
               </label>
               <div class="modal-actions">
