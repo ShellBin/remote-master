@@ -108,7 +108,12 @@ export const useDeviceStore = defineStore('device', () => {
       return;
     }
 
+    if (data.event === 'config.changed') {
+      scheduleFetch();
+      return;
+    }
     if (data.event === 'state') {
+      // 新固件只推 status；保留 data.config 分支兼容旧固件。
       if (data.config) config.value = data.config;
       if (data.status) status.value = {...status.value, ...data.status};
       return;
@@ -138,18 +143,63 @@ export const useDeviceStore = defineStore('device', () => {
   }
 
   /** 页面加载时通过 HTTP 获取全量状态（config + status） */
+  async function fetchJson(path) {
+    const response = await fetch(`${httpBase()}${path}`, {signal: AbortSignal.timeout(10000)});
+    if (!response.ok) throw new Error(`${path} → HTTP ${response.status}`);
+    return response.json();
+  }
+
+  let fetching = null;
+  let refetchQueued = false;
+  let configRefreshTimer = 0;
+
+  /**
+   * 分段拉取配置。按键/映射集合可能很大，整份 config 一次性下发会给设备
+   * 带来明显的堆压力；这里按集合顺序请求，任一时刻只保留一个响应。
+   */
   async function fetchState() {
-    try {
-      const response = await fetch(`${httpBase()}/api/state`, {signal: AbortSignal.timeout(10000)});
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      if (data.event === 'state') {
-        config.value = data.config || emptyConfig();
-        status.value = data.status || {};
-      }
-    } catch (error) {
-      setNotice(`初始状态获取失败：${error.message}`, 'error');
+    if (fetching) {
+      refetchQueued = true;
+      return fetching;
     }
+    fetching = (async () => {
+      try {
+        const meta = await fetchJson('/api/config/meta');
+        const remotes = await fetchJson('/api/config/remotes');
+        const keys = await fetchJson('/api/config/keys');
+        const macros = await fetchJson('/api/config/macros');
+        const mappings = await fetchJson('/api/config/mappings');
+        const statusData = await fetchJson('/api/status');
+        config.value = {
+          settings: meta.settings || {},
+          hosts: meta.hosts || [],
+          nextId: meta.nextId,
+          lastHostId: meta.lastHostId || '',
+          remotes: remotes.remotes || [],
+          keys: keys.keys || [],
+          macros: macros.macros || [],
+          mappings: mappings.mappings || [],
+        };
+        status.value = {...status.value, ...statusData};
+      } catch (error) {
+        setNotice(`状态获取失败：${error.message}`, 'error');
+      }
+    })();
+    try {
+      await fetching;
+    } finally {
+      fetching = null;
+      if (refetchQueued) {
+        refetchQueued = false;
+        void fetchState();
+      }
+    }
+  }
+
+  /** 合并短时间内的多次 config.changed，避免连续保存触发风暴式重拉。 */
+  function scheduleFetch() {
+    clearTimeout(configRefreshTimer);
+    configRefreshTimer = setTimeout(() => { void fetchState(); }, 150);
   }
 
   function connect() {
@@ -179,8 +229,8 @@ export const useDeviceStore = defineStore('device', () => {
     ws.onerror = () => ws.close();
   }
 
-  /** 请求设备立刻推送一次完整状态（正常无需调用，连上即自动推送）。 */
-  const refresh = () => command('state.get');
+  /** 重新拉取一次配置与状态（HTTP 分段接口）。 */
+  const refresh = () => fetchState();
 
   /** 通过 HTTP 导出业务数据并触发浏览器下载。scope=remote/macro 时需提供 id 与 name 用于命名。 */
   async function exportData(scope, id = '', name = '') {

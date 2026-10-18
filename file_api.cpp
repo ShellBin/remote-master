@@ -30,14 +30,23 @@ static const size_t kMaxAssetBytes = 512 * 1024;  // 单文件上限
 static const size_t kMinFreeBytes = 24 * 1024;    // 剩余空间低于此值即拒绝写入
 static const size_t kMaxEntries = 160;            // 列表返回条目上限
 static const uint8_t kMaxDepth = 5;               // 目录遍历深度上限
-static const uint8_t kDirQueue = 12;              // 遍历队列长度上限
+static const uint8_t kDirQueue = 12;               // 遍历队列长度上限
 
-static WebServer* webServer = nullptr;
+static AsyncWebServer* webServer = nullptr;
 static bool mounted = false;
 static bool uploadOk = false;
 static String uploadTarget, uploadError;
 static size_t uploadBytes = 0;
 static File uploadFile;
+// 上传状态是全局的（暂存文件只有一个），并发上传会互相覆盖。这里只允许
+// 一个请求写入；被拒绝的请求用 _tempObject 打标记，在完成回调里回 409，
+// 不参与全局上传状态（否则会覆盖正在上传的文件目标）。
+static AsyncWebServerRequest* uploadOwner = nullptr;
+// 客户端中途断连时库不会回调 final，owner 可能永远留在旧请求上。超过该
+// 时长没有任何数据块即视为已放弃，允许新上传接管，避免设备卡死在"忙"。
+static uint32_t uploadOwnerAt = 0;
+static const uint32_t kUploadOwnerTimeoutMs = 30000;
+static const uintptr_t kUploadRejectedMarker = 1;
 
 // 上传写缓冲：上传开始时动态申请 64KB（攒批落盘，把"每个 TCP 分片一次
 // flash 事务"降为"每 64KB 一次"），结束/中止即释放——不常驻占用堆，
@@ -49,8 +58,12 @@ static uint8_t* uploadBuf = nullptr;
 static size_t uploadBufSize = 0;
 static size_t uploadBufLen = 0;
 
+static void releaseUploadBuffer();
+
 static void acquireUploadBuffer() {
-  uploadBufLen = 0;
+  // 上一次上传若因客户端断连没有收到 final 回调，缓冲不会被释放；
+  // 这里先回收，避免每次中断都泄漏 64KB 堆。
+  releaseUploadBuffer();
   uploadBuf = static_cast<uint8_t*>(malloc(kUploadBufPreferred));
   if (uploadBuf) {
     uploadBufSize = kUploadBufPreferred;
@@ -264,7 +277,7 @@ static void appendFiles(JsonArray out, size_t& count) {
 // 递归清空目录：每层先单遍扫描收集全部子项（句柄随取随关），再统一删除。
 // 旧实现每删一个文件就重新扫描一遍目录，n 个文件是 O(n²) 次 flash 目录
 // 读取，几十上百个文件时单次 HTTP 请求能把 loop() 堵死几十秒。
-// 目录本身用 rmdir 删除（空目录），remove 在部分版本的 LittleFS 上对目录不可靠。
+// 目录本身用 rmdir 删除（空目录），remove 在部分版本的 LittleFS 对目录不可靠。
 struct ChildEntry {
   String path;
   bool isDirectory;
@@ -323,19 +336,19 @@ static bool ensureParentDirectories(const String& path) {
 
 // ==================== 文件读写 API ====================
 
-static void sendJson(int status, JsonDocument& doc) {
+static void sendJson(AsyncWebServerRequest* request, int status, JsonDocument& doc) {
   String body;
   serializeJson(doc, body);
-  webServer->send(status, "application/json; charset=utf-8", body);
+  request->send(status, "application/json; charset=utf-8", body);
 }
 
-static void sendError(int status, const char* message) {
+static void sendError(AsyncWebServerRequest* request, int status, const char* message) {
   JsonDocument doc;
   doc["error"] = message;
-  sendJson(status, doc);
+  sendJson(request, status, doc);
 }
 
-static void handleList() {
+static void handleList(AsyncWebServerRequest* request) {
   JsonDocument doc;
   uint32_t total, used;
   fsUsageCached(total, used);
@@ -381,38 +394,42 @@ static void handleList() {
     count++;
   }
   doc["truncated"] = count >= kMaxEntries;
-  sendJson(200, doc);
+  sendJson(request, 200, doc);
 }
-static void handleDownload(const String& path) {
+
+static void handleDownload(AsyncWebServerRequest* request, const String& path) {
   File file = LittleFS.open(path, "r");
   if (!file || file.isDirectory()) {
     if (file) file.close();
-    sendError(404, "File not found");
+    sendError(request, 404, "File not found");
     return;
   }
-  webServer->sendHeader("Cache-Control", "no-cache");
-  webServer->streamFile(file, mimeFor(path));
-  file.close();
+  AsyncWebServerResponse* response = request->beginResponse(file, path, mimeFor(path));
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
+  // 不能在这里 file.close()：AsyncFileResponse 持有 File 句柄副本，真正的
+  // 读取发生在 handler 返回之后；提前关闭会让 _sourceValid() 变 false，
+  // 客户端收到 500 "Invalid data in handler"。句柄随响应对象析构关闭。
 }
 
-static void handleDelete(const String& path) {
+static void handleDelete(AsyncWebServerRequest* request, const String& path) {
   if (!writablePath(path) && !legacyAssetPath(path)) {
-    sendError(403, "Only /frontend and legacy root assets are deletable");
+    sendError(request, 403, "Only /frontend and legacy root assets are deletable");
     return;
   }
   if (!LittleFS.exists(path)) {
-    sendError(404, "Path not found");
+    sendError(request, 404, "Path not found");
     return;
   }
   if (!clearDirectory(path, 0)) {
-    sendError(500, "Delete failed; check serial log for details");
+    sendError(request, 500, "Delete failed; check serial log for details");
     return;
   }
   fsUsageRefresh(true);
   JsonDocument doc;
   doc["ok"] = true;
   doc["path"] = path;
-  sendJson(200, doc);
+  sendJson(request, 200, doc);
 }
 
 // 把暂存缓冲刷到 flash；失败时返回 false。
@@ -430,16 +447,30 @@ static void failUpload(const char* reason, size_t bytes) {
   uploadBufLen = 0;
   if (uploadFile) uploadFile.close();
   LittleFS.remove(kUploadTemp);
+  uploadOwner = nullptr;
 }
 
-static void handleUpload(HTTPUpload& upload) {
-  if (upload.status == UPLOAD_FILE_START) {
+// AsyncWebSocket 风格的上传回调：替代原 WebServer 的 HTTPUpload 状态机。
+// onUpload 按数据块调用（final==true 表示最后一块），我们只在主文件流
+// 上处理（index==0 时初始化，final 时落盘到暂存文件并改名）。
+static void onUpload(AsyncWebServerRequest* request, const String& filename,
+                     size_t index, uint8_t* data, size_t len, bool final) {
+  // 首次块：初始化（空文件也可能直接以 index==0、len==0、final==true 到达）
+  if (index == 0) {
+    if (uploadOwner && uploadOwner != request &&
+        millis() - uploadOwnerAt < kUploadOwnerTimeoutMs) {
+      request->_tempObject = reinterpret_cast<void*>(kUploadRejectedMarker);
+      Serial.println("[FS] upload rejected: another upload is in progress");
+      return;
+    }
+    uploadOwner = request;
+    uploadOwnerAt = millis();
     uploadOk = false;
     uploadBytes = 0;
     acquireUploadBuffer();
     uploadError = "";
-    uploadFile = File();  // 释放上一次上传残留的句柄，避免误关旧文件
-    uploadTarget = webServer->arg("path");
+    uploadFile = File();
+    uploadTarget = request->arg("path");
     Serial.printf("[FS] upload start: %s\n", uploadTarget.c_str());
     if (!mounted) uploadError = "Filesystem not mounted";
     else if (!uploadPath(uploadTarget)) uploadError = "Only /frontend/<file> is writable";
@@ -447,39 +478,46 @@ static void handleUpload(HTTPUpload& upload) {
     if (!uploadError.isEmpty()) {
       Serial.printf("[FS] upload refused: %s (%s)\n", uploadError.c_str(), uploadTarget.c_str());
       releaseUploadBuffer();
+      uploadOwner = nullptr;
       return;
     }
     uploadFile = LittleFS.open(kUploadTemp, "w");
     uploadOk = static_cast<bool>(uploadFile);
-    if (!uploadOk) uploadError = "Cannot open staging file";
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (!uploadOk) return;
-    uploadBytes += upload.currentSize;
-    if (!uploadFile || uploadBytes > kMaxAssetBytes) {
-      failUpload(uploadBytes > kMaxAssetBytes ? "File too large"
-                                              : "Write failed (filesystem full?)",
-                 uploadBytes);
+    if (!uploadOk) { uploadError = "Cannot open staging file"; uploadOwner = nullptr; }
+  }
+
+  // 被拒绝的并发请求不参与全局状态，否则会覆盖正在上传的文件目标。
+  if (request != uploadOwner) return;
+  uploadOwnerAt = millis();  // 有数据块到达即刷新占用时间
+  if (!uploadOk || !uploadFile) return;
+
+  uploadBytes += len;
+  if (uploadBytes > kMaxAssetBytes) {
+    failUpload("File too large", uploadBytes);
+    return;
+  }
+
+  // 写入目标先落到暂存文件，全部写完再改名，掉电不会留下半个资源文件。
+  // 先在 RAM 里攒满缓冲再落盘，减少 flash 写事务次数（每次写都会关
+  // cache、阻塞 ISR）。
+  const uint8_t* src = data;
+  size_t remaining = len;
+  while (remaining) {
+    size_t room = uploadBufSize - uploadBufLen;
+    size_t chunk = remaining < room ? remaining : room;
+    memcpy(uploadBuf + uploadBufLen, src, chunk);
+    uploadBufLen += chunk;
+    src += chunk;
+    remaining -= chunk;
+    if (uploadBufLen == uploadBufSize && !flushUploadBuffer()) {
+      failUpload("Write failed (filesystem full?)", uploadBytes);
       return;
     }
-    // 写入目标先落到暂存文件，全部写完再改名，掉电不会留下半个资源文件。
-    // 先在 RAM 里攒满缓冲再落盘，减少 flash 写事务次数（每次写都会关
-    // cache、阻塞 ISR）。
-    const uint8_t* data = upload.buf;
-    size_t remaining = upload.currentSize;
-    while (remaining) {
-      size_t room = uploadBufSize - uploadBufLen;
-      size_t chunk = remaining < room ? remaining : room;
-      memcpy(uploadBuf + uploadBufLen, data, chunk);
-      uploadBufLen += chunk;
-      data += chunk;
-      remaining -= chunk;
-      if (uploadBufLen == uploadBufSize && !flushUploadBuffer()) {
-        failUpload("Write failed (filesystem full?)", uploadBytes);
-        return;
-      }
-    }
-  } else if (upload.status == UPLOAD_FILE_END) {
-    if (uploadOk && uploadFile && !flushUploadBuffer())
+  }
+
+  // 最后一块：完成上传
+  if (final) {
+    if (uploadFile && !flushUploadBuffer())
       failUpload("Write failed (filesystem full?)", uploadBytes);
     if (uploadFile) {
       uploadFile.flush();
@@ -499,14 +537,7 @@ static void handleUpload(HTTPUpload& upload) {
     fsUsageRefresh(true);
     Serial.printf("[FS] upload end: %s (ok=%d, bytes=%u, err=%s)\n",
                   uploadTarget.c_str(), uploadOk, uploadBytes, uploadError.c_str());
-  } else if (upload.status == UPLOAD_FILE_ABORTED) {
-    uploadOk = false;
-    uploadError = "Upload aborted";
-    Serial.printf("[FS] upload aborted: %s\n", uploadTarget.c_str());
-    releaseUploadBuffer();
-    if (uploadFile) uploadFile.close();
-    LittleFS.remove(kUploadTemp);
-    fsUsageRefresh(true);
+    uploadOwner = nullptr;
   }
 }
 
@@ -524,28 +555,31 @@ static bool openAsset(const String& relative, File& out, bool& encoded) {
   return static_cast<bool>(out);
 }
 
-static void serveFallbackLanding() {
-  webServer->sendHeader("Cache-Control", "no-store");
-  webServer->send_P(200, "text/html; charset=utf-8", kFallbackHtml);
+static void serveFallbackLanding(AsyncWebServerRequest* request) {
+  AsyncWebServerResponse* response = request->beginResponse_P(
+      200, "text/html; charset=utf-8", kFallbackHtml);
+  response->addHeader("Cache-Control", "no-store");
+  request->send(response);
 }
 
 // 静态资源下发：/frontend 目录映射到 URL 根路径，未命中时回退入口页。
 // 设备上只保留 .gz 压缩版（构建时删除原文件），因此若客户端不支持 gzip
 // 则返回 406。openAsset 优先返回 .gz；若某文件未压缩（过小/收益不足）
 // 则返回原文件，encoded=false。
-void fileApiServeStatic(const String& uri) {
+void fileApiServeStatic(AsyncWebServerRequest* request) {
   if (!webServer) return;
-  if (webServer->method() != HTTP_GET && webServer->method() != HTTP_HEAD) {
-    sendError(405, "Method not allowed");
+  if (request->method() != HTTP_GET && request->method() != HTTP_HEAD) {
+    sendError(request, 405, "Method not allowed");
     return;
   }
+  String uri = request->url();
   if (uri.startsWith("/api/")) {
-    sendError(404, "Unknown endpoint");
+    sendError(request, 404, "Unknown endpoint");
     return;
   }
   String relative = requestPath(uri);
   if (relative.isEmpty()) {
-    sendError(400, "Bad request path");
+    sendError(request, 400, "Bad request path");
     return;
   }
   if (relative == "/") relative = "/index.html";
@@ -560,60 +594,69 @@ void fileApiServeStatic(const String& uri) {
     found = mounted && openAsset(relative, file, encoded);
   }
   if (!found) {
-    if (relative == "/index.html") serveFallbackLanding();
-    else sendError(404, "Asset not found; deploy the frontend first");
+    if (relative == "/index.html") serveFallbackLanding(request);
+    else sendError(request, 404, "Asset not found; deploy the frontend first");
     return;
   }
 
   // 不支持 gzip 的客户端退回原文件（设备上 .gz 与原文件同时保留）。
-  bool acceptGzip = webServer->hasHeader("Accept-Encoding") &&
-                    webServer->header("Accept-Encoding").indexOf("gzip") >= 0;
+  bool acceptGzip = request->hasHeader("Accept-Encoding") &&
+                    request->header("Accept-Encoding").indexOf("gzip") >= 0;
   if (encoded && !acceptGzip) {
     file.close();
     file = LittleFS.open(String(kFrontendRoot) + relative, "r");
     if (!file) {
-      sendError(404, "Asset not found; deploy the frontend first");
+      sendError(request, 404, "Asset not found; deploy the frontend first");
       return;
     }
     encoded = false;
   }
 
   bool immutable = relative.startsWith("/assets/");
-  webServer->sendHeader("Cache-Control", immutable ? "public, max-age=31536000, immutable" : "no-cache");
-  webServer->sendHeader("X-Content-Type-Options", "nosniff");
-  if (encoded) webServer->sendHeader("Content-Encoding", "gzip");
-  webServer->streamFile(file, mimeFor(relative));
-  file.close();
+  AsyncWebServerResponse* response = request->beginResponse(
+      file, uri, mimeFor(relative));
+  response->addHeader("Cache-Control", immutable
+      ? "public, max-age=31536000, immutable" : "no-cache");
+  response->addHeader("X-Content-Type-Options", "nosniff");
+  if (encoded) response->addHeader("Content-Encoding", "gzip");
+  request->send(response);
+  // 同 handleDownload：响应源由 AsyncFileResponse 持有，这里提前关闭会导致
+  // 所有静态资源返回 500。句柄随响应对象析构关闭。
 }
 
 // ==================== 路由注册 ====================
 
-void fileApiBegin(WebServer& server) {
+void fileApiBegin(AsyncWebServer& server) {
   webServer = &server;
   // begin() 在已挂载时同样返回成功；totalBytes() 作为兜底判据。
   mounted = LittleFS.begin(false) || LittleFS.totalBytes() > 0;
   fsUsageRefresh(true);
 
-  server.on("/api/files", HTTP_GET, [] {
+  server.on("/api/files", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (!mounted) {
-      sendError(503, "Filesystem not initialized");
+      sendError(request, 503, "Filesystem not initialized");
       return;
     }
-    String path = webServer->arg("path");
+    String path = request->arg("path");
     if (path.isEmpty()) {
-      handleList();
+      handleList(request);
       return;
     }
     if (!readablePath(path)) {
-      sendError(403, "Protected path");
+      sendError(request, 403, "Protected path");
       return;
     }
-    handleDownload(path);
+    handleDownload(request, path);
   });
 
-  server.on(
-    "/api/files", HTTP_POST,
-    [] {
+  server.on("/api/files", HTTP_POST,
+    [](AsyncWebServerRequest* request) {
+      // 此回调在所有数据接收完毕后调用（onUpload 已处理落盘）。
+      if (request->_tempObject == reinterpret_cast<void*>(kUploadRejectedMarker)) {
+        request->_tempObject = nullptr;
+        sendError(request, 409, "Another upload is in progress");
+        return;
+      }
       JsonDocument doc;
       doc["ok"] = uploadOk;
       if (uploadOk) {
@@ -623,15 +666,18 @@ void fileApiBegin(WebServer& server) {
         doc["error"] = uploadError.isEmpty() ? "Upload failed" : uploadError;
         if (!uploadTarget.isEmpty()) doc["path"] = uploadTarget;
       }
-      sendJson(uploadOk ? 200 : 400, doc);
+      sendJson(request, uploadOk ? 200 : 400, doc);
     },
-    [] { handleUpload(webServer->upload()); });
+    [](AsyncWebServerRequest* request, const String& filename,
+       size_t index, uint8_t* data, size_t len, bool final) {
+      onUpload(request, filename, index, data, len, final);
+    });
 
-  server.on("/api/files", HTTP_DELETE, [] {
+  server.on("/api/files", HTTP_DELETE, [](AsyncWebServerRequest* request) {
     if (!mounted) {
-      sendError(503, "Filesystem not initialized");
+      sendError(request, 503, "Filesystem not initialized");
       return;
     }
-    handleDelete(webServer->arg("path"));
+    handleDelete(request, request->arg("path"));
   });
 }

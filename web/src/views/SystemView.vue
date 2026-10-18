@@ -153,7 +153,22 @@ async function forgetHost(host) {
   await run(() => catalog.remove('hosts', host.id), '已忘记主机');
 }
 
-const connectHost = host => run(() => catalog.reconnectToHost(host.id), `正在尝试连接 ${host.address}`);
+// 设备侧当前保存的配对密钥地址。老固件没有该字段时为 null，按"已配对"处理，
+// 避免升级前误报。
+const bondedDevices = computed(() => (
+  Array.isArray(device.status.ble?.bonds) ? device.status.ble.bonds : null
+));
+
+const isHostBonded = host => !bondedDevices.value || bondedDevices.value.some(
+  addr => String(addr).toLowerCase() === String(host.address).toLowerCase(),
+);
+
+const connectHost = host => run(
+  () => catalog.reconnectToHost(host.id),
+  isHostBonded(host)
+    ? `正在尝试连接 ${host.address}`
+    : `设备没有 ${host.name || host.address} 的配对密钥，已开放 2 分钟配对窗口；请在电脑蓝牙设置中重新连接该设备`,
+);
 
 const exportData = scope => run(() => device.exportData(scope), '数据已导出');
 
@@ -212,6 +227,7 @@ async function resetSystem() {
         v-for="host in catalog.hosts"
         :key="host.id"
         :host="host"
+        :bonded="isHostBonded(host)"
         :disabled="busy"
         @save="payload => saveHost(host, payload)"
         @remove="forgetHost(host)"

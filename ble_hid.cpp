@@ -253,13 +253,28 @@ bool bleHidConnected() {
   return bleConnected.load();
 }
 
-// 尝试重连指定主机：断开当前连接，将该地址设为白名单目标，触发广播
+// 尝试重连指定主机：断开当前连接，将该地址设为白名单目标，触发广播。
+// 若设备侧没有该主机的配对密钥（重刷固件 / 换板 / 主机的旧密钥已失效），
+// 仅靠广播不可能恢复连接——BLE 外设不能主动发起连接。此时改为开放配对
+// 窗口，让主机在加密失败后重新配对（macOS 通常会自动删除旧密钥再配）。
 bool bleReconnectToHost(const String& address, uint8_t addressType) {
+  NimBLEAddress target(std::string(address.c_str()), addressType);
+  bool bonded = NimBLEDevice::isBonded(target);
   if (hidServer && peerHandle.load() != BLE_HS_CONN_HANDLE_NONE)
     hidServer->disconnect(peerHandle.load());
   tryingHost = address;
+  if (bonded) {
+    pairingUntil = 0;
+    newHostPairing.store(false);
+    Serial.printf("[BLE] reconnect requested to %s type=%u (bonded)\n",
+                  address.c_str(), addressType);
+  } else {
+    pairingUntil = millis() + 120000;
+    newHostPairing.store(NimBLEDevice::getNumBonds() > 0);
+    Serial.printf("[BLE] reconnect target %s type=%u has NO bond; pairing window opened\n",
+                  address.c_str(), addressType);
+  }
   restartAdvertising.store(true);
-  Serial.printf("[BLE] reconnect requested to %s type=%u\n", address.c_str(), addressType);
   return true;
 }
 
@@ -350,10 +365,18 @@ void bleHostStatus(JsonObject obj) {
   obj["connected"] = bleHidConnected();
   obj["host"] = connectedHost;
   obj["tryingHost"] = tryingHost;
-  bool unpaired = NimBLEDevice::getNumBonds() == 0;
+  int bondCount = NimBLEDevice::getNumBonds();
+  bool unpaired = bondCount == 0;
   obj["pairing"] = unpaired || (pairingUntil && static_cast<int32_t>(pairingUntil - millis()) > 0);
   obj["pairingAlwaysOpen"] = unpaired;
-  obj["bondCount"] = NimBLEDevice::getNumBonds();
+  obj["bondCount"] = bondCount;
+  // 已保存主机是否仍持有密钥：前端据此提示"需要重新配对"，
+  // 而不是让"尝试连接"看起来无声失败。
+  JsonArray bonds = obj["bonds"].to<JsonArray>();
+  for (int i = 0; i < bondCount; ++i) {
+    std::string bondedAddr = NimBLEDevice::getBondedAddress(i).toString();
+    bonds.add(bondedAddr.c_str());
+  }
   obj["pairingNewHost"] = newHostPairing.load();
   obj["linkConnected"] = peerHandle.load() != BLE_HS_CONN_HANDLE_NONE;
   obj["reportSubscriptions"] = reportSubscriptions.load();
@@ -388,6 +411,7 @@ static bool resolveHostType(const String& address, uint8_t& addressType) {
 }
 
 void tickBleHosts() {
+  ConfigGuard configGuard;  // 本函数会写 hosts / lastHostId，需与 HTTP 读取互斥
   // BLE callbacks only set atomics. Filesystem and JSON work stay on loop().
   if (pairingUntil && static_cast<int32_t>(millis() - pairingUntil) >= 0) {
     pairingUntil = 0;
@@ -421,7 +445,13 @@ void tickBleHosts() {
       for (JsonObject host : hosts)
         if (host["address"].as<String>() == connectedHost &&
             host["addressType"].as<uint8_t>() == address.getType()) found = host;
-      if (found.isNull() && hosts.size() < 8) {
+      // 主机数量上限与 NimBLE bond 槽位保持一致：满了就淘汰最早添加的记录，
+      // 否则会出现"配置里有主机、设备侧却已没有密钥"的错位。
+      if (found.isNull() && hosts.size() >= kMaxHosts) {
+        while (hosts.size() >= kMaxHosts) hosts.remove(0);
+        Serial.println("[BLE] host limit reached; oldest host entry dropped");
+      }
+      if (found.isNull()) {
         found = hosts.add<JsonObject>();
         uint32_t next = remoteConfig["nextId"] | 1U;
         remoteConfig["nextId"] = next + 1;
@@ -476,25 +506,29 @@ void tickBleHosts() {
     resolveLastHost(targetAddress, targetType);
   }
 
-  // 检查目标是否仍有 bond
+  // 检查目标是否仍有 bond（空目标不构造 NimBLEAddress，避免刷错误日志）
   bool targetBonded = false;
   if (!targetAddress.isEmpty()) {
-    NimBLEAddress addr(std::string(targetAddress.c_str()), targetType);
-    for (int i = 0; i < NimBLEDevice::getNumBonds(); ++i)
-      if (NimBLEDevice::getBondedAddress(i) == addr) targetBonded = true;
-  }
+    NimBLEAddress targetAddr(std::string(targetAddress.c_str()), targetType);
+    targetBonded = NimBLEDevice::isBonded(targetAddr);
 
-  if (!unpaired && !pairingUntil && targetBonded) {
-    tryingHost = targetAddress;
-    NimBLEAddress addr(std::string(targetAddress.c_str()), targetType);
-    NimBLEDevice::whiteListAdd(addr);
-    advertising->setScanFilter(false, true);
-  } else if (!unpaired && !pairingUntil) {
-    // 有 bond 但目标不可达 — 开放可发现（fallback），避免设备假死
-    advertising->setScanFilter(false, false);
-    Serial.printf("[BLE] WARNING: target not bonded, advertising openly\n");
+    if (!unpaired && !pairingUntil && targetBonded) {
+      tryingHost = targetAddress;
+      NimBLEDevice::whiteListAdd(targetAddr);
+      advertising->setScanFilter(false, true);
+    } else if (!unpaired && !pairingUntil) {
+      // 有 bond 但目标不可达 — 开放可发现（fallback），避免设备假死。
+      // 注意：这里只是让设备可被发现，主机必须自己发起连接。
+      advertising->setScanFilter(false, false);
+      Serial.printf("[BLE] WARNING: target %s not bonded; re-pairing required\n",
+                    targetAddress.c_str());
+    } else {
+      // 配对窗口开放：可被发现，并保留目标供前端显示。
+      advertising->setScanFilter(false, false);
+      tryingHost = targetAddress;
+    }
   } else {
-    // 无配对主机或配对窗口开放：可被发现
+    // 无目标（无 bond 或没有 lastHost）：开放可发现。
     advertising->setScanFilter(false, false);
   }
   advertisingStarted = advertising->start();

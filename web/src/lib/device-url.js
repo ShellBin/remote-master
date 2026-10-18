@@ -1,13 +1,13 @@
 // 设备地址解析。
 //
-// 设备有两个服务：HTTP（80）与事件通道 WebSocket（81，固件写死）。
+// 设备有两个服务：HTTP（80）与事件通道 WebSocket（/ws 路径，与 HTTP 同端口）。
 // 页面有三种运行形态，对应两种寻址方式：
 //
 //   形态             HTTP                     事件通道
 //   ───────────────  ───────────────────────  ──────────────────────────
-//   真机（生产）      同源                     同源 host + :81
-//   本机 dev         同源（dev server 代理）   同源 host + /ws（代理 → :81）
-//   dev + 直连模式    VITE_DEVICE              VITE_DEVICE host + :81
+//   真机（生产）      同源                     同源 host + /ws
+//   本机 dev         同源（dev server 代理）   同源 host + /ws（代理 → /ws）
+//   dev + 直连模式    VITE_DEVICE              VITE_DEVICE host + /ws
 //
 // dev 下默认走代理（见 vite.config.js 的 server.proxy）：浏览器只与 dev server
 // 通信，因此不产生跨域，设备侧也不需要任何 CORS 头。
@@ -42,5 +42,6 @@ export function websocketUrl() {
   }
   const url = baseUrl();
   const scheme = url.protocol === 'https:' ? 'wss' : 'ws';
-  return `${scheme}://${url.hostname}:81/`;
+  // 用 host 而不是 hostname：直连模式可能带非 80 端口（http://192.168.4.1:8080）。
+  return `${scheme}://${url.host}/ws`;
 }

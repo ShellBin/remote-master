@@ -1,12 +1,12 @@
 #pragma once
-#include <WebServer.h>
+#include <ESPAsyncWebServer.h>
 
 // 注册 /api/files 路由（列目录 / 上传 / 删除）。
-void fileApiBegin(WebServer& server);
+void fileApiBegin(AsyncWebServer& server);
 
 // 静态资源下发：/frontend 目录映射到 URL 根路径，未命中时回退入口页。
 // 需在 fileApiBegin 之后、server.begin() 之前用 server.onNotFound 挂载。
-void fileApiServeStatic(const String& uri);
+void fileApiServeStatic(AsyncWebServerRequest* request);
 
 // LittleFS 用量缓存。usedBytes() 底层是 lfs_fs_size，要遍历整个分区的
 // metadata pair，文件多时一次调用就要几十毫秒且反复开关 flash cache，

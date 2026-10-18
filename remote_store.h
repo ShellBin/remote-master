@@ -3,6 +3,9 @@
 
 // Stable IDs keep transports, learned inputs and output actions independent.
 extern JsonDocument remoteConfig;
+// 主机（BLE 配对）保存上限。与 NimBLE 的 bond 槽位（默认 3）保持一致，
+// 避免配置里保留没有密钥的主机条目。
+constexpr uint8_t kMaxHosts = 3;
 // 配置内容版本号：saveRemoteConfig 每次成功落盘 +1。pushState 用它判断
 // config 是否变化，避免每次推送都对 32KB 配置做全文序列化比较。
 extern uint32_t configRevision;
@@ -20,6 +23,5 @@ bool remoteAction(JsonObjectConst mapping, Binding& action);
 bool saveRemoteConfig(String* error = nullptr);
 JsonObjectConst resolveInputMapping(const char* transport, const char* device,
                                    const char* proto, const char* code);
-void writeConfigSummary(JsonObject obj);
 // 确保 settings 对象存在且字段合法（缺失或非法时回填默认值）。
 void ensureDefaultSettings();

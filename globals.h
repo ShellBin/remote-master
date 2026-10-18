@@ -29,4 +29,14 @@ extern size_t macroStep;
 extern size_t macroTextOffset;
 extern JsonDocument runningSteps;
 
+// ---------- 配置并发保护 ----------
+// remoteConfig 的读取可能发生在 AsyncWebServer 的 TCP 任务（/api/config/* 等），
+// 写入发生在 loop()。写操作与这些读取用同一把递归锁串行化。
+void configLock();
+void configUnlock();
+struct ConfigGuard {
+  ConfigGuard() { configLock(); }
+  ~ConfigGuard() { configUnlock(); }
+};
+
 #endif // GLOBALS_H

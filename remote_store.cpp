@@ -12,7 +12,7 @@ static constexpr size_t kMaxConfigBytes = 32768;
 // Keep startup validation and mutation validation on the same limits.
 static size_t collectionLimit(const char* collection) {
   if (strcmp(collection, "remotes") == 0) return 12;
-  if (strcmp(collection, "hosts") == 0) return 8;
+  if (strcmp(collection, "hosts") == 0) return kMaxHosts;
   if (strcmp(collection, "macros") == 0) return 50;
   return 0;
 }
@@ -200,6 +200,10 @@ bool remoteStoreBegin() {
     // 不做版本向下兼容。仅当 JSON 解析失败、集合结构非法（非数组或超出
     // 条目上限）或体积超过 32KB 时视为致命问题，由调用方格式化 FS。
     if (err) return false;
+    // 主机上限与 BLE bond 槽位对齐。历史配置超过上限时丢弃最早添加的条目，
+    // 而不是把整份配置判为损坏（那会触发重建并丢失其它数据）。
+    JsonArray hosts = remoteConfig["hosts"].as<JsonArray>();
+    while (hosts.size() > kMaxHosts) hosts.remove(0);
     for (const char* name : {"remotes", "keys", "macros", "mappings", "hosts"}) {
       size_t limit = collectionLimit(name);
       if (!remoteConfig[name].is<JsonArray>() ||
@@ -265,10 +269,6 @@ JsonObjectConst resolveInputMapping(const char* transport, const char* device,
         return mapping;
   }
   return JsonObjectConst();
-}
-
-void writeConfigSummary(JsonObject obj) {
-  obj.set(remoteConfig.as<JsonObjectConst>());
 }
 
 bool remoteStoreCommand(const String& op, JsonObjectConst args, String& error) {

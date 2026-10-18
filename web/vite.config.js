@@ -40,8 +40,7 @@ function deviceErrorReporter(target) {
 export default defineConfig(({mode}) => {
   const target = deviceTarget(loadEnv(mode, root));
   const device = new URL(target);
-  // 固件把事件通道固定在 81 端口，与 HTTP 的 80 分开（见 API.md 第 6 章）。
-  const eventTarget = `${device.protocol}//${device.hostname}:81`;
+  // 固件把事件通道挂在 /ws 路径上，与 HTTP 共用 80 端口。
 
   return {
     // 必须是绝对根路径：固件把 /frontend 目录 1:1 映射到 URL 根路径。
@@ -78,7 +77,7 @@ export default defineConfig(({mode}) => {
       },
       // 开发时前端跑在本机，接口与事件通道都由 dev server 转给真机：
       //   localhost:5173/api/*  →  192.168.4.1/api/*      （HTTP）
-      //   localhost:5173/ws     →  192.168.4.1:81/        （WebSocket）
+      //   localhost:5173/ws     →  192.168.4.1/ws         （WebSocket）
       // 浏览器只跟 dev server 说话，全程同源，因此不存在跨域——设备侧也就不需要
       // 任何 CORS 头（固件确实没发）。改设备地址只需改 .env.development。
       proxy: {
@@ -88,12 +87,10 @@ export default defineConfig(({mode}) => {
           configure: deviceErrorReporter(target),
         },
         '/ws': {
-          target: eventTarget,
+          target,
           ws: true,
           changeOrigin: true,
-          // 设备的事件通道挂在根路径上，这里把 /ws 还原成 /。
-          rewrite: path => path.replace(/^\/ws/, '/'),
-          configure: deviceErrorReporter(eventTarget),
+          configure: deviceErrorReporter(target),
         },
       },
       // 想在手机上调试可加 --host；此时手机访问本机 IP，代理仍然在本机完成。

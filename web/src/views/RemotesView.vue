@@ -192,8 +192,8 @@ async function submitImport() {
       name: name,
       transport: data.remotes[0]?.transport || 'ir',
     });
-    // 主动请求最新 state，确保拿到固件生成的遥控器 ID
-    await device.commandWithTimeout('state.get', {}, 10000);
+    // 主动拉取一次配置，确保拿到固件生成的遥控器 ID
+    await device.refresh();
     const newRemote = catalog.remotes.find(r => r.name === name);
     if (!newRemote) throw new Error('创建遥控器失败');
     selectedRemoteId.value = newRemote.id;
@@ -468,9 +468,9 @@ async function commitRename(key) {
                 v-focus
               />
               <span
-                v-if="!catalog.mappingOf(key.id)"
                 class="badge"
-              >未映射</span>
+                :class="{ok: catalog.mappingOf(key.id)}"
+              >{{ catalog.mappingOf(key.id) ? '已映射' : '未映射' }}</span>
             </div>
             <div class="key-card-body">
               <span class="key-proto">{{ key.proto }}</span>
@@ -486,7 +486,6 @@ async function commitRename(key) {
               <button class="danger" :disabled="busy" @click="removeKey(key)">删除</button>
             </div>
             <p v-if="!key.capturePath" class="key-hint">缺少原始脉冲，请重新学习</p>
-            <p v-else-if="catalog.mappingOf(key.id)" class="key-hint ok">已映射</p>
           </div>
         </div>
         <p v-if="!keysHere.length" class="hint">该遥控器尚无按键，开始学习后按实体遥控器按键</p>
@@ -591,7 +590,6 @@ async function commitRename(key) {
 .key-card-actions{display:flex;gap:6px;justify-content:flex-end}
 .key-card-actions button{padding:5px 10px;font-size:12px}
 .key-hint{margin:4px 0 0;font-size:11px;color:var(--muted)}
-.key-hint.ok{color:var(--ok)}
 
 /* 导入进度 */
 .import-progress{margin:12px 0;display:flex;flex-direction:column;gap:8px}

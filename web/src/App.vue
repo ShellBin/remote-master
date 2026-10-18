@@ -122,6 +122,7 @@ article{padding:24px;background:var(--card);border:1px solid var(--line);border-
 
 /* Badge */
 .badge{display:inline-block;border:1px solid var(--warn);color:var(--warn);border-radius:5px;font-size:11px;font-style:normal;padding:0 5px;margin-left:6px;vertical-align:1px;white-space:nowrap}
+.badge.ok{border-color:var(--accent);color:var(--accent)}
 
 /* Segment */
 .segment{display:flex;gap:16px;flex-wrap:wrap;margin:12px 0 16px}
@@ -146,8 +147,9 @@ footer{margin:24px 0;text-align:center;font-size:12px}
 
 /* 蓝牙主机卡片 */
 .host-card{background:#182437;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:12px 0}
-.host-card-header{padding:12px 16px;background:#141f31;border-bottom:1px solid var(--line)}
+.host-card-header{padding:12px 16px;background:#141f31;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .host-card-address{font-family:monospace;font-size:14px;font-weight:500;color:var(--text)}
+.host-card-warning{font-size:11px;padding:1px 8px;border-radius:999px;background:rgba(255,183,77,.15);color:#ffb74d}
 .host-card-body{padding:12px 16px 0}
 .host-card-body label{margin:0;font-size:13px;color:var(--muted)}
 .host-card-body input{margin-top:4px}
