@@ -577,10 +577,20 @@ void handleWsCommand(uint32_t clientId, uint8_t* payload, size_t length) {
   if (applyBleNameAfter) bleApplyName();
 }
 
+static const uint32_t kIrDebounceMs = 150;  // 过滤按键连击后紧跟的第一个重复帧
+
 void captureIrFrame() {
   const IRData data = IrReceiver.decodedIRData;
   // The ISR reuses rawbuf after resume(); snapshot every tick first.
   static uint16_t rawTicks[RAW_BUFFER_LENGTH];
+  // 按键去抖：同 proto+code 在 kIrDebounceMs 内只处理第一次。
+  // 部分遥控器按下后紧接着发送第二个完整帧（非 NEC 重复标志），会被当
+  // 成两次输入。记录上次派发的键，连击时跳过早于去抖窗口的那一帧；去
+  // 抖窗口之后的重复帧照常派发，不影响长按连续输入。
+  static uint32_t lastDispatchAt = 0;
+  static char lastDispatchProto[16] = "";
+  static char lastDispatchCode[32] = "";
+  static bool lastDispatchWasFresh = false;
   uint16_t rawCount = data.rawlen > 0 ? data.rawlen - 1 : 0;
   if (rawCount >= RAW_BUFFER_LENGTH) rawCount = RAW_BUFFER_LENGTH - 1;
   if (learningMode)
@@ -665,6 +675,17 @@ void captureIrFrame() {
     wsSend(message);
     learningUntil = now + 300000;
   } else if (!learningMode) {
+    // 按键去抖：过滤紧接在按键按下后、同一 proto+code 的第一个重复帧。
+    bool isImmediateRepeat = (strcmp(proto.c_str(), lastDispatchProto) == 0 &&
+                              strcmp(code, lastDispatchCode) == 0 &&
+                              lastDispatchWasFresh &&
+                              now - lastDispatchAt < kIrDebounceMs);
+    strlcpy(lastDispatchProto, proto.c_str(), sizeof(lastDispatchProto));
+    strlcpy(lastDispatchCode, code, sizeof(lastDispatchCode));
+    lastDispatchAt = now;
+    lastDispatchWasFresh = !isImmediateRepeat;
+    if (isImmediateRepeat) return;
+
     // 非学习模式也广播 input 事件，用于前端按键卡片高亮提示。
     // 节流到 100ms：狂按遥控器时高频广播 + 状态推送会挤占 loop，
     // 拖慢 WS/HTTP 响应。HID 分发（dispatchInput）不节流，按键响应不受影响。
